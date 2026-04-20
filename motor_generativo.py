@@ -3,6 +3,7 @@ import numpy as np
 import soundfile as sf
 import music21 as m21
 import librosa
+import os  
 from memoria_base import extraer_adn_musical
 
 def construir_cadena_markov(secuencia):

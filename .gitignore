@@ -8,3 +8,5 @@ __pycache__/
 
 # Ignorar archivos MIDI si no quieres subir tu obra original (opcional)
 *.mid
+*.wav
+*.mp3
