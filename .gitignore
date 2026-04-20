@@ -1,0 +1,10 @@
+# Entornos virtuales
+env/
+venv/
+
+# Archivos de caché de Python
+__pycache__/
+*.pyc
+
+# Ignorar archivos MIDI si no quieres subir tu obra original (opcional)
+*.mid
