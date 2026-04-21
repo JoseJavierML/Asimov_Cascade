@@ -23,7 +23,7 @@ Al ejecutar el motor, la obra atraviesa múltiples fases configurables por el us
 
 ---
 
-## Despliegue Profesional (Docker)
+## Despliegue
 
 La forma recomendada y más estable de ejecutar este proyecto es mediante contenedores Docker, lo cual incluye todas las dependencias del sistema operativo (como `ffmpeg` para procesamiento de audio).
 
@@ -41,7 +41,8 @@ La forma recomendada y más estable de ejecutar este proyecto es mediante conten
 ### Despliegue Normal
 1. Crea un entorno virtual e instala las dependencias:
    pip install -r requirements.txt
-2. streamlit run app.py
+2. Ejecuta la interfaz web:
+   streamlit run app.py
 
-### Licencia
+## Licencia
 Este proyecto se distribuye bajo la licencia GNU GPL v3. Queda permitido su uso, modificación y distribución para fines educativos, artísticos o comerciales, siempre que se reconozca la autoría original.
