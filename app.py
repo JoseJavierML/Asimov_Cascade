@@ -2,7 +2,13 @@ import os
 import tempfile
 import streamlit as st
 from memoria_base import extraer_adn_musical
-from motor_generativo import construir_cadena_markov, generar_nueva_obra, sintetizar_audio_directo
+from motor_generativo import (
+    _escala_desde_secuencia,
+    _temperatura_por_fase,
+    construir_cadena_markov,
+    generar_nueva_obra,
+    sintetizar_audio_directo,
+)
 
 _TMPDIR = tempfile.mkdtemp(prefix="asimov_")
 
@@ -28,7 +34,7 @@ with col_izq:
 with col_der:
     st.subheader("⚙️ Parámetros")
     num_fases    = st.slider("Fases de degradación", 3, 20, 10)
-    p_error_max  = st.slider("Entropía final", 0.05, 0.80, 0.35, 0.05, format="%.0f%%")
+    temperatura_max = st.slider("Temperatura final", 0.50, 2.50, 1.80, 0.05, format="%.2f")
     orden_markov = st.select_slider("Orden Markov", [1, 2, 3, 4], value=2,
                                     help="Orden 1-2 para piezas cortas. 3-4 para piezas largas.")
     mostrar_onda = st.checkbox("Mostrar forma de onda", value=False)
@@ -56,6 +62,9 @@ with st.spinner(msg):
         st.error(f"❌ Error al leer el archivo: {e}")
         st.stop()
 
+for datos in memoria_actual.values():
+    datos["escala_base"] = _escala_desde_secuencia(datos["secuencia"])
+
 total_eventos = sum(len(v["secuencia"]) for v in memoria_actual.values())
 
 with st.expander("🔍 Debug — primeros 10 eventos extraídos", expanded=False):
@@ -80,14 +89,19 @@ progress_bar = st.progress(0)
 status_text  = st.empty()
 
 for f in range(1, num_fases + 1):
-    p_error = (f / num_fases) * p_error_max
-    status_text.text(f"Generando Fase {f}/{num_fases}  (Entropía: {p_error:.1%})…")
+    temperatura = _temperatura_por_fase(f / num_fases, temperatura_max)
+    status_text.text(f"Generando Fase {f}/{num_fases}  (Temperatura: {temperatura:.2f})…")
 
     nueva_memoria: dict = {}
     for pista, datos in memoria_actual.items():
         modelo    = construir_cadena_markov(datos["secuencia"], orden=orden_markov)
-        nueva_sec = generar_nueva_obra(modelo, len(datos["secuencia"]), p_error, orden=orden_markov)
-        nueva_memoria[pista] = {"instrumento": datos["instrumento"], "secuencia": nueva_sec}
+        modelo["escala_base"] = datos.get("escala_base") or _escala_desde_secuencia(datos["secuencia"])
+        nueva_sec = generar_nueva_obra(modelo, len(datos["secuencia"]), temperatura, orden=orden_markov)
+        nueva_memoria[pista] = {
+            "instrumento": datos["instrumento"],
+            "secuencia": nueva_sec,
+            "escala_base": modelo["escala_base"],
+        }
 
     nombre_salida = os.path.join(_TMPDIR, f"Fase_{f:02d}_Audio.wav")
 
@@ -100,7 +114,7 @@ for f in range(1, num_fases + 1):
     ratio    = f / num_fases
     etiqueta = "🟢 Lucidez Residual" if ratio <= 0.33 else ("🟡 Confusión" if ratio <= 0.66 else "🔴 Ruido Blanco")
 
-    with st.expander(f"Fase {f:02d} — {p_error:.1%}  {etiqueta}"):
+    with st.expander(f"Fase {f:02d} — {temperatura:.2f}  {etiqueta}"):
         with open(nombre_salida, "rb") as wf:
             st.audio(wf.read(), format="audio/wav")
 
