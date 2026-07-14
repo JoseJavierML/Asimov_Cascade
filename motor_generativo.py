@@ -8,8 +8,14 @@ warnings.filterwarnings("ignore")
 
 
 def construir_cadena_markov(secuencia: list, orden: int = 2) -> dict:
+    def _normalizar_evento(evento):
+        if isinstance(evento, tuple):
+            return tuple(evento)
+        if isinstance(evento, list):
+            return tuple(evento)
+        return evento
   
-    notas    = [e[0] for e in secuencia]
+    notas    = [_normalizar_evento(e[0]) for e in secuencia]
     durs     = [e[1] for e in secuencia]
     n        = len(notas)
 
@@ -33,11 +39,17 @@ def construir_cadena_markov(secuencia: list, orden: int = 2) -> dict:
     }
 
 
-def _notas_desde_evento(nota_str: str) -> list[int]:
+def _notas_desde_evento(nota_str) -> list[int]:
     import librosa
 
-    if not isinstance(nota_str, str) or nota_str in ("REST", ""):
+    if nota_str in ("REST", ""):
         return []
+
+    if isinstance(nota_str, (tuple, list)):
+        notas_midi = []
+        for elemento in nota_str:
+            notas_midi.extend(_notas_desde_evento(elemento))
+        return notas_midi
 
     if nota_str.startswith("Acorde_"):
         partes = nota_str.split("_", 1)[1].split(".")
@@ -52,7 +64,7 @@ def _notas_desde_evento(nota_str: str) -> list[int]:
         return notas_midi
 
     try:
-        return [int(round(float(librosa.note_to_midi(nota_str))))]
+        return [int(round(float(librosa.note_to_midi(str(nota_str)))))]
     except Exception:
         return []
 
@@ -89,11 +101,33 @@ def _softmax(logits: list[float] | np.ndarray, temperatura: float) -> np.ndarray
     return exp / suma
 
 
-def _temperatura_por_fase(progreso: float, temperatura_maxima: float, temperatura_minima: float = 0.18) -> float:
+def _temperatura_por_fase(
+    fase: int,
+    total_fases: int,
+    temperatura_maxima: float,
+    temperatura_minima: float = 0.10,
+) -> float:
+    total_fases = max(1, int(total_fases))
+    fase = max(1, int(fase))
+
+    if total_fases == 1:
+        progreso = 1.0
+    else:
+        progreso = (fase - 1) / max(1, total_fases - 1)
+
     progreso = float(np.clip(progreso, 0.0, 1.0))
-    curvatura = 4.0
-    crecimiento = np.expm1(curvatura * progreso) / np.expm1(curvatura)
-    return float(temperatura_minima + (temperatura_maxima - temperatura_minima) * crecimiento)
+
+    # Exponential easing: very flat at the start, then steep near the end.
+    curvatura = 5.0
+    exponente = np.clip(curvatura * progreso, 0.0, 50.0)
+    denom = np.expm1(curvatura)
+    if abs(denom) < 1e-12:
+        crecimiento = progreso
+    else:
+        crecimiento = np.expm1(exponente) / denom
+
+    temperatura = temperatura_minima + (temperatura_maxima - temperatura_minima) * crecimiento
+    return float(min(temperatura_maxima, max(temperatura_minima, temperatura)))
 
 
 def _elegir_nota_por_temperatura(
@@ -178,13 +212,87 @@ def _dur_para(nota: str, duraciones: dict) -> float:
 
 
 _PERFILES = {
-    "piano":   [1.00, 0.60, 0.30, 0.18, 0.10, 0.06, 0.03, 0.01],
-    "strings": [1.00, 0.80, 0.60, 0.40, 0.25, 0.15, 0.08, 0.04],
-    "organ":   [1.00, 1.00, 0.80, 0.60, 0.40, 0.30, 0.20, 0.10],
-    "default": [1.00, 0.50, 0.25, 0.12, 0.06, 0.03, 0.01, 0.00],
+    "piano": {
+        "carrier_ratio": 1.0,
+        "mod_ratio": 2.0,
+        "mod_index": 5.2,
+        "mod_decay": 4.4,
+        "amp_decay": 2.7,
+        "attack": 0.008,
+        "release": 0.160,
+        "noise_mix": 0.060,
+        "body_mix": 0.30,
+        "detune_cents": 4.0,
+        "warmth": 0.22,
+        "drive": 1.10,
+        "resonances": [
+            (1.00, 0.22, 4.4),
+            (2.01, 0.11, 5.8),
+            (3.02, 0.05, 7.8),
+            (4.10, 0.03, 9.6),
+        ],
+    },
+    "strings": {
+        "carrier_ratio": 1.0,
+        "mod_ratio": 1.5,
+        "mod_index": 3.0,
+        "mod_decay": 3.0,
+        "amp_decay": 1.9,
+        "attack": 0.012,
+        "release": 0.240,
+        "noise_mix": 0.035,
+        "body_mix": 0.24,
+        "detune_cents": 2.5,
+        "warmth": 0.20,
+        "drive": 1.05,
+        "resonances": [
+            (1.00, 0.20, 3.8),
+            (2.00, 0.10, 5.2),
+            (3.00, 0.05, 7.0),
+            (4.01, 0.02, 8.5),
+        ],
+    },
+    "organ": {
+        "carrier_ratio": 1.0,
+        "mod_ratio": 2.0,
+        "mod_index": 1.3,
+        "mod_decay": 1.2,
+        "amp_decay": 0.9,
+        "attack": 0.012,
+        "release": 0.180,
+        "noise_mix": 0.015,
+        "body_mix": 0.16,
+        "detune_cents": 1.2,
+        "warmth": 0.28,
+        "drive": 1.00,
+        "resonances": [
+            (1.00, 0.16, 2.8),
+            (2.00, 0.08, 3.8),
+            (3.00, 0.04, 5.5),
+        ],
+    },
+    "default": {
+        "carrier_ratio": 1.0,
+        "mod_ratio": 2.0,
+        "mod_index": 4.0,
+        "mod_decay": 3.5,
+        "amp_decay": 2.2,
+        "attack": 0.010,
+        "release": 0.180,
+        "noise_mix": 0.040,
+        "body_mix": 0.22,
+        "detune_cents": 3.0,
+        "warmth": 0.22,
+        "drive": 1.08,
+        "resonances": [
+            (1.00, 0.18, 3.8),
+            (2.00, 0.09, 5.0),
+            (3.02, 0.04, 6.8),
+        ],
+    },
 }
 
-def _perfil_instrumento(instrumento) -> list:
+def _perfil_instrumento(instrumento) -> dict:
     nombre = ""
     try:
         nombre = (instrumento.instrumentName or "").lower()
@@ -199,32 +307,106 @@ def _perfil_instrumento(instrumento) -> list:
     return _PERFILES["default"]
 
 
-def _sintetizar_nota(freq: float, duracion: float, sr: int, amplitud: float, perfil: list) -> np.ndarray:
+def _sintetizar_nota(freq: float, duracion: float, sr: int, amplitud: float, perfil: dict) -> np.ndarray:
+    from scipy.signal import lfilter
+
     n = max(1, int(sr * duracion))
-    t = np.linspace(0, duracion, n, endpoint=False)
-    onda = np.zeros(n)
-    for k, amp_p in enumerate(perfil, start=1):
-        onda += amp_p * np.sin(2 * np.pi * freq * k * t)
+    perfil = perfil or _PERFILES["default"]
+    freq = float(np.clip(freq, 20.0, min(sr * 0.45, 12000.0)))
 
-    attack  = min(int(sr * 0.01), n // 4)
-    decay   = min(int(sr * 0.05), n // 4)
-    release = min(int(sr * 0.08), n // 3)
-    sl      = 0.75
+    t = np.arange(n, dtype=np.float32) / float(sr)
+    seed = int((freq * 1000.0) + (duracion * 1_000_000.0)) & 0xFFFFFFFF
+    rng = np.random.default_rng(seed)
 
-    env = np.ones(n) * sl
-    if attack  > 0: env[:attack]               = np.linspace(0,  1,  attack)
-    if decay   > 0: env[attack:attack + decay]  = np.linspace(1,  sl, decay)
-    if release > 0 and release < n:
-        env[-release:] = np.linspace(sl, 0, release)
+    carrier_ratio = float(perfil.get("carrier_ratio", 1.0))
+    mod_ratio = float(perfil.get("mod_ratio", 2.0))
+    mod_index = float(perfil.get("mod_index", 4.0))
+    mod_decay = float(perfil.get("mod_decay", 3.0))
+    amp_decay = float(perfil.get("amp_decay", 2.0))
+    attack = max(1, int(sr * float(perfil.get("attack", 0.008))))
+    release = max(1, int(sr * float(perfil.get("release", 0.16))))
+    noise_mix = float(perfil.get("noise_mix", 0.04))
+    body_mix = float(perfil.get("body_mix", 0.22))
+    detune_cents = float(perfil.get("detune_cents", 0.0))
+    warmth = float(perfil.get("warmth", 0.22))
+    drive = float(perfil.get("drive", 1.0))
+    resonances = perfil.get("resonances", [])
 
-    return (amplitud * onda * env).astype(np.float32)
+    attack_env = np.ones(n, dtype=np.float32)
+    if attack > 1:
+        ataque = np.linspace(0.0, 1.0, attack, endpoint=False, dtype=np.float32)
+        ataque = np.clip(ataque, 0.0, 1.0)
+        attack_env[:attack] = ataque
+
+    release_env = np.ones(n, dtype=np.float32)
+    if release < n:
+        release_env[-release:] = np.linspace(1.0, 0.0, release, endpoint=True, dtype=np.float32)
+
+    decay_rate = amp_decay / max(0.7, np.sqrt(freq / 220.0))
+    amp_env = np.exp(-t * decay_rate).astype(np.float32)
+    envelope = np.clip(attack_env * release_env * amp_env, 0.0, 1.0)
+
+    mod_env = np.exp(-t * mod_decay).astype(np.float32)
+    mod_index_t = mod_index * mod_env
+    mod_index_t *= np.clip(1.10 - (freq / 9000.0), 0.35, 1.0)
+
+    detune = (detune_cents / 1200.0) * (0.65 + 0.35 * np.sin(freq * 0.017))
+    fase_car = rng.uniform(0.0, 2.0 * np.pi)
+    fase_mod = rng.uniform(0.0, 2.0 * np.pi)
+
+    modulador = np.sin(2.0 * np.pi * freq * mod_ratio * t + fase_mod)
+    portadora = np.sin(
+        2.0 * np.pi * freq * carrier_ratio * (1.0 + detune) * t
+        + mod_index_t * modulador
+        + fase_car
+    )
+
+    segunda_capa = np.sin(
+        2.0 * np.pi * freq * (carrier_ratio * 2.0) * (1.0 - 0.5 * detune) * t
+        + 0.55 * mod_index_t * np.sin(2.0 * np.pi * freq * (mod_ratio * 1.01) * t + 0.7 * fase_mod)
+        + 0.43 * fase_car
+    )
+
+    senal = (0.76 * portadora) + (0.24 * segunda_capa)
+
+    if noise_mix > 0:
+        ataque_ruido = rng.normal(0.0, 1.0, n).astype(np.float32)
+        ataque_ruido = lfilter([0.5, 0.5], [1.0], ataque_ruido).astype(np.float32)
+        ataque_ruido *= np.exp(-t * 180.0).astype(np.float32)
+        senal += noise_mix * ataque_ruido
+
+    if resonances:
+        cuerpo = np.zeros(n, dtype=np.float32)
+        for ratio, amp, decay in resonances:
+            fase = rng.uniform(0.0, 2.0 * np.pi)
+            cuerpo += (
+                float(amp)
+                * np.sin(2.0 * np.pi * freq * float(ratio) * t + fase).astype(np.float32)
+                * np.exp(-float(decay) * t).astype(np.float32)
+            )
+        senal += body_mix * cuerpo
+
+    if n > 4:
+        senal = lfilter([warmth], [1.0, warmth - 1.0], senal).astype(np.float32)
+
+    senal = np.tanh(senal * drive).astype(np.float32)
+    return (amplitud * senal * envelope).astype(np.float32)
 
 
-def _nota_a_freq(nota_str: str):
+def _nota_a_freq(nota_str):
     import librosa
     if nota_str in ("REST", ""):
         return None
     try:
+        if isinstance(nota_str, (tuple, list)):
+            freqs = []
+            for elemento in nota_str:
+                freq_elemento = _nota_a_freq(elemento)
+                if isinstance(freq_elemento, list):
+                    freqs.extend(freq_elemento)
+                elif freq_elemento is not None:
+                    freqs.append(freq_elemento)
+            return freqs or None
         if nota_str.startswith("Acorde_"):
             nums = [int(x) for x in nota_str.split("_")[1].split(".") if x.isdigit()]
             if not nums:
@@ -260,7 +442,7 @@ def sintetizar_audio_directo(
                 errores_nota += 1
                 continue
 
-            if not isinstance(nota_str, str):
+            if not isinstance(nota_str, (str, tuple, list)):
                 errores_nota += 1
                 continue
 
@@ -275,7 +457,20 @@ def sintetizar_audio_directo(
                 errores_nota += 1
                 continue
 
-            audio_pista.append(_sintetizar_nota(freq, duracion, sr, amplitud_pista, perfil))
+            if isinstance(freq, list):
+                if not freq:
+                    errores_nota += 1
+                    continue
+                voces = []
+                amplitud_voces = amplitud_pista / max(1, len(freq))
+                for indice, freq_voz in enumerate(freq):
+                    freq_detune = float(freq_voz) * (1.0 + 0.0015 * (indice - (len(freq) - 1) / 2.0))
+                    voces.append(_sintetizar_nota(freq_detune, duracion, sr, amplitud_voces, perfil))
+                bloque_mezclado = np.sum(voces, axis=0).astype(np.float32)
+                bloque_mezclado /= max(1, len(voces))
+                audio_pista.append(bloque_mezclado)
+            else:
+                audio_pista.append(_sintetizar_nota(freq, duracion, sr, amplitud_pista, perfil))
             notas_ok += 1
 
         if audio_pista:
@@ -323,7 +518,7 @@ if __name__ == "__main__":
         print("\n=== INICIANDO CASCADA DE ASIMOV ===\n")
 
         for f in range(1, num_fases + 1):
-            temperatura = _temperatura_por_fase(f / num_fases, temperatura_maxima)
+            temperatura = _temperatura_por_fase(f, num_fases, temperatura_maxima)
             print(f"Fase {f:02d}/{num_fases}  Temperatura: {temperatura:.2f}")
 
             nueva_memoria = {}

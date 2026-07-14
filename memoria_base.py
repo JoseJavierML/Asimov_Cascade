@@ -7,125 +7,173 @@ warnings.filterwarnings("ignore")
 
 def extraer_adn_desde_audio(ruta_audio: str) -> list[tuple[str, float]]:
     import librosa
-    from scipy.ndimage import median_filter
+    from scipy.signal import find_peaks
 
     HOP = 512
     SR  = 22050
-    UMBRAL_CONFIANZA = 0.15  
-    MIN_DURACION     = 0.08   
-    VENTANA_MEDIANA  = 7
-    MAX_GAP_FRAMES   = 2
+    UMBRAL_CONFIANZA = 0.15
+    MIN_DURACION     = 0.05
+    UMBRAL_SILENCIO_DB = -45.0
+    TOL_ONSET_FRAMES   = 1
+    UMBRAL_ONSET_DELTA = 0.08
 
     print(f"  [Audio] Cargando: {os.path.basename(ruta_audio)}")
     y, sr = librosa.load(ruta_audio, sr=SR)
+    y_harmonic, _ = librosa.effects.hpss(y)
 
-    f0, _voiced_flag, voiced_probs = librosa.pyin(
-        y,
-        fmin=librosa.note_to_hz("C2"),
-        fmax=librosa.note_to_hz("C7"),
-        frame_length=2048,
+    frame_length = 2048
+    rms = librosa.feature.rms(y=y_harmonic, frame_length=frame_length, hop_length=HOP, center=True)[0]
+    db_frames = librosa.amplitude_to_db(np.maximum(rms, 1e-10), ref=np.max)
+
+    onsets = librosa.onset.onset_detect(
+        y=y,
+        sr=sr,
         hop_length=HOP,
-        fill_na=None,
+        units="frames",
+        backtrack=False,
+        pre_max=1,
+        post_max=1,
+        pre_avg=4,
+        post_avg=4,
+        delta=UMBRAL_ONSET_DELTA,
+        wait=3,
     )
+
+    cqt = np.abs(
+        librosa.cqt(
+            y_harmonic,
+            sr=SR,
+            hop_length=HOP,
+            fmin=librosa.note_to_hz("C2"),
+            n_bins=5 * 12,
+            bins_per_octave=12,
+        )
+    )
+    cqt_freqs = librosa.cqt_frequencies(5 * 12, fmin=librosa.note_to_hz("C2"), bins_per_octave=12)
+
+    n_frames = min(cqt.shape[1], len(db_frames))
+    cqt = cqt[:, :n_frames]
+    db_frames = db_frames[:n_frames]
+
+    if len(onsets):
+        onsets = np.unique(onsets[onsets < n_frames])
+
+    silencio_frames = db_frames <= UMBRAL_SILENCIO_DB
 
     seg_dur = HOP / SR  
 
-    midi_crudo = np.full(len(f0), np.nan, dtype=float)
-    for idx, (freq, prob) in enumerate(zip(f0, voiced_probs)):
-        if freq is None or np.isnan(freq) or prob < UMBRAL_CONFIANZA:
-            continue
-        midi_crudo[idx] = float(librosa.hz_to_midi(float(freq)))
-
-    midi_suavizado = np.full_like(midi_crudo, np.nan)
-    indices_voz = np.flatnonzero(~np.isnan(midi_crudo))
-    if indices_voz.size:
-        cortes = np.where(np.diff(indices_voz) != 1)[0] + 1
-        for segmento in np.split(indices_voz, cortes):
-            valores = midi_crudo[segmento]
-            if len(valores) >= 3:
-                ventana = min(VENTANA_MEDIANA, len(valores))
-                if ventana % 2 == 0:
-                    ventana -= 1
-                if ventana < 3:
-                    ventana = 3
-                valores = median_filter(valores, size=ventana, mode="nearest")
-            midi_suavizado[segmento] = valores
-
-    notas_frames: list[str | None] = []
-    for midi_val in midi_suavizado:
-        if np.isnan(midi_val):
-            notas_frames.append(None)
-            continue
-        midi_entero = int(np.rint(midi_val))
-        notas_frames.append(librosa.midi_to_note(midi_entero, octave=True, cents=False))
-
-    if notas_frames:
-        i = 0
-        while i < len(notas_frames):
-            if notas_frames[i] is not None:
-                i += 1
-                continue
-            inicio = i
-            while i < len(notas_frames) and notas_frames[i] is None:
-                i += 1
-            fin = i
-            hueco = fin - inicio
-            nota_izq = notas_frames[inicio - 1] if inicio > 0 else None
-            nota_der = notas_frames[fin] if fin < len(notas_frames) else None
-            if nota_izq is not None and nota_izq == nota_der and hueco <= MAX_GAP_FRAMES:
-                for j in range(inicio, fin):
-                    notas_frames[j] = nota_izq
-
     secuencia: list[tuple[str, float]] = []
-    nota_actual = None
-    dur_acumulada = 0.0
-    conf_acumulada = []
-    hueco_acumulado = 0.0
-    huecos_consecutivos = 0
 
-    def _confirmar_nota(nota, dur, confs):
-        if nota is None or dur < MIN_DURACION:
+    def _agregar_rest(secuencia_local: list[tuple[str, float]], duracion: float):
+        if duracion > 0:
+            secuencia_local.append(("REST", round(duracion, 3)))
+
+    def _notas_desde_segmento(inicio: int, fin: int) -> tuple[str, ...] | None:
+        if fin <= inicio:
             return
-        conf_media = float(np.mean(confs)) if confs else 0.0
-        if conf_media < UMBRAL_CONFIANZA:
+        energia_segmento = np.mean(cqt[:, inicio:fin], axis=1)
+        if not np.any(np.isfinite(energia_segmento)) or float(np.max(energia_segmento)) <= 0:
             return
-        secuencia.append((nota, round(dur, 3)))
+        prominencia_minima = max(float(np.max(energia_segmento)) * 0.03, 1e-8)
+        picos, propiedades = find_peaks(energia_segmento, prominence=prominencia_minima, distance=1)
 
-    for nota_frame, prob in zip(notas_frames, voiced_probs):
-        if nota_frame is None:
-            if nota_actual is not None:
-                hueco_acumulado += seg_dur
-                huecos_consecutivos += 1
-                if huecos_consecutivos > MAX_GAP_FRAMES:
-                    _confirmar_nota(nota_actual, dur_acumulada, conf_acumulada)
-                    nota_actual = None
-                    dur_acumulada = 0.0
-                    conf_acumulada = []
-                    hueco_acumulado = 0.0
-                    huecos_consecutivos = 0
-            continue
+        candidatos: list[int] = []
+        if picos.size:
+            orden = np.argsort(propiedades["prominences"])[::-1]
+            candidatos.extend(int(picos[i]) for i in orden)
 
-        if nota_actual is None:
-            nota_actual = nota_frame
-            dur_acumulada = seg_dur
-            conf_acumulada = [prob]
-            hueco_acumulado = 0.0
-            huecos_consecutivos = 0
-            continue
+        if len(candidatos) < 4:
+            orden_energia = np.argsort(energia_segmento)[::-1]
+            candidatos.extend(int(indice) for indice in orden_energia)
 
-        if nota_frame == nota_actual:
-            dur_acumulada += seg_dur + hueco_acumulado
-            conf_acumulada.append(prob)
-        else:
-            _confirmar_nota(nota_actual, dur_acumulada, conf_acumulada)
-            nota_actual = nota_frame
-            dur_acumulada = seg_dur
-            conf_acumulada = [prob]
+        notas: list[str] = []
+        midi_vistos: set[int] = set()
+        for bin_idx in candidatos:
+            if len(notas) >= 4:
+                break
+            if bin_idx < 0 or bin_idx >= len(cqt_freqs):
+                continue
 
-        hueco_acumulado = 0.0
-        huecos_consecutivos = 0
+            freq = float(cqt_freqs[bin_idx])
+            if freq <= 0:
+                continue
 
-    _confirmar_nota(nota_actual, dur_acumulada, conf_acumulada)
+            midi_val = int(np.rint(librosa.hz_to_midi(freq)))
+            midi_val = int(np.clip(midi_val, librosa.note_to_midi("C2"), librosa.note_to_midi("C6")))
+            if midi_val in midi_vistos:
+                continue
+
+            notas.append(librosa.midi_to_note(midi_val, octave=True, cents=False))
+            midi_vistos.add(midi_val)
+
+        if not notas:
+            return None
+
+        return tuple(sorted(notas, key=lambda n: librosa.note_to_midi(n)))
+
+    def _extraer_con_onsets():
+        secuencia_local: list[tuple[str, float]] = []
+        ultimo_fin = 0
+
+        for indice, onset in enumerate(onsets):
+            inicio = max(0, int(onset) - TOL_ONSET_FRAMES)
+            if inicio >= n_frames:
+                continue
+
+            siguiente_onset = int(onsets[indice + 1]) if indice + 1 < len(onsets) else n_frames
+            limite = min(n_frames, max(inicio + 1, siguiente_onset))
+            silencios = np.flatnonzero(silencio_frames[inicio:limite])
+            fin = inicio + int(silencios[0]) if silencios.size else limite
+
+            if fin - inicio < 1:
+                continue
+
+            nota = _notas_desde_segmento(inicio, fin)
+            duracion = (fin - inicio) * seg_dur
+            if nota is None or duracion < MIN_DURACION:
+                continue
+
+            if inicio > ultimo_fin:
+                _agregar_rest(secuencia_local, (inicio - ultimo_fin) * seg_dur)
+
+            secuencia_local.append((nota, round(duracion, 3)))
+            ultimo_fin = fin
+
+        return secuencia_local
+
+    def _extraer_sin_onsets():
+        secuencia_local: list[tuple[str, float]] = []
+        ultimo_fin = 0
+        notas_validas = ~silencio_frames
+
+        if not np.any(notas_validas):
+            return secuencia_local
+
+        indices_voz = np.flatnonzero(notas_validas)
+        cortes = np.where(np.diff(indices_voz) != 1)[0] + 1
+
+        for segmento in np.split(indices_voz, cortes):
+            if segmento.size == 0:
+                continue
+
+            inicio = int(segmento[0])
+            fin = int(segmento[-1]) + 1
+            nota = _notas_desde_segmento(inicio, fin)
+            duracion = (fin - inicio) * seg_dur
+            if nota is None or duracion < MIN_DURACION:
+                continue
+
+            if inicio > ultimo_fin:
+                _agregar_rest(secuencia_local, (inicio - ultimo_fin) * seg_dur)
+
+            secuencia_local.append((nota, round(duracion, 3)))
+            ultimo_fin = fin
+
+        return secuencia_local
+
+    secuencia = _extraer_con_onsets()
+    if not secuencia:
+        secuencia = _extraer_sin_onsets()
 
     print(f"  [Audio] Extraídos {len(secuencia)} eventos (duración mínima {MIN_DURACION*1000:.0f} ms).")
     if len(secuencia) < 10:

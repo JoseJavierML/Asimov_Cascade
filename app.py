@@ -34,7 +34,7 @@ with col_izq:
 with col_der:
     st.subheader("⚙️ Parámetros")
     num_fases    = st.slider("Fases de degradación", 3, 20, 10)
-    temperatura_max = st.slider("Temperatura final", 0.50, 2.50, 1.80, 0.05, format="%.2f")
+    temperatura_max = st.slider("Temperatura final", 0.50, 3.00, 1.80, 0.05, format="%.2f")
     orden_markov = st.select_slider("Orden Markov", [1, 2, 3, 4], value=2,
                                     help="Orden 1-2 para piezas cortas. 3-4 para piezas largas.")
     mostrar_onda = st.checkbox("Mostrar forma de onda", value=False)
@@ -89,7 +89,7 @@ progress_bar = st.progress(0)
 status_text  = st.empty()
 
 for f in range(1, num_fases + 1):
-    temperatura = _temperatura_por_fase(f / num_fases, temperatura_max)
+    temperatura = _temperatura_por_fase(f, num_fases, temperatura_max)
     status_text.text(f"Generando Fase {f}/{num_fases}  (Temperatura: {temperatura:.2f})…")
 
     nueva_memoria: dict = {}
