@@ -8,32 +8,62 @@ warnings.filterwarnings("ignore")
 
 
 def construir_cadena_markov(secuencia: list, orden: int = 2) -> dict:
-    def _normalizar_evento(evento):
-        if isinstance(evento, tuple):
-            return tuple(evento)
-        if isinstance(evento, list):
-            return tuple(evento)
-        return evento
-  
-    notas    = [_normalizar_evento(e[0]) for e in secuencia]
-    durs     = [e[1] for e in secuencia]
-    n        = len(notas)
+    def _normalizar_nota(nota):
+        if nota in ("REST", ""):
+            return "REST"
+        if isinstance(nota, (tuple, list)):
+            notas_normalizadas = []
+            for elemento in nota:
+                nota_normalizada = _normalizar_nota(elemento)
+                if nota_normalizada == "REST":
+                    continue
+                if isinstance(nota_normalizada, tuple):
+                    notas_normalizadas.extend(nota_normalizada)
+                else:
+                    notas_normalizadas.append(str(nota_normalizada))
+            if not notas_normalizadas:
+                return "REST"
+            return tuple(dict.fromkeys(notas_normalizadas))
+        if isinstance(nota, str) and nota.startswith("Acorde_"):
+            partes = [parte for parte in nota.split("_", 1)[1].split(".") if parte]
+            if not partes:
+                return "REST"
+            return tuple(partes)
+        return (str(nota),)
+
+    def _bin_velocidad(velocidad: float, es_descanso: bool = False) -> float:
+        if es_descanso:
+            return 0.0
+        velocidad = float(np.clip(velocidad, 0.0, 1.0))
+        if velocidad <= 0.0:
+            return 0.2
+        tier = int(np.clip(np.ceil(velocidad * 5.0), 1, 5))
+        return tier / 5.0
+
+    estados = []
+    for evento in secuencia:
+        if not isinstance(evento, (list, tuple)) or len(evento) < 2:
+            continue
+
+        nota = _normalizar_nota(evento[0])
+        duracion = round(float(evento[1]), 6)
+        velocidad = float(evento[2]) if len(evento) >= 3 else 1.0
+        estado = (nota, duracion, _bin_velocidad(velocidad, nota == "REST"))
+        estados.append(estado)
+
+    n = len(estados)
 
     orden_real = min(orden, max(1, n - 1))
 
     transiciones: dict = {}
     for i in range(n - orden_real):
-        clave     = tuple(notas[i : i + orden_real])
-        siguiente = notas[i + orden_real]
+        clave     = tuple(estados[i : i + orden_real])
+        siguiente = estados[i + orden_real]
         transiciones.setdefault(clave, []).append(siguiente)
-
-    duraciones: dict = {}
-    for nota, dur in zip(notas, durs):
-        duraciones.setdefault(nota, []).append(dur)
 
     return {
         "transiciones": transiciones,
-        "duraciones": duraciones,
+        "estados": estados,
         "orden": orden_real,
         "escala_base": _escala_desde_secuencia(secuencia),
     }
@@ -71,7 +101,10 @@ def _notas_desde_evento(nota_str) -> list[int]:
 
 def _escala_desde_secuencia(secuencia: list) -> set[int]:
     escala = set()
-    for nota, _dur in secuencia:
+    for evento in secuencia:
+        if not isinstance(evento, (list, tuple)) or len(evento) < 2:
+            continue
+        nota = evento[0]
         for midi in _notas_desde_evento(nota):
             escala.add(midi % 12)
     return escala
@@ -130,23 +163,24 @@ def _temperatura_por_fase(
     return float(min(temperatura_maxima, max(temperatura_minima, temperatura)))
 
 
-def _elegir_nota_por_temperatura(
+def _elegir_estado_por_temperatura(
     modelo: dict,
     clave_actual: tuple,
-    todas_notas: list[str],
+    todos_estados: list,
     temperatura: float,
-) -> str:
+) -> tuple:
     transiciones = modelo["transiciones"]
     escala_base = set(modelo.get("escala_base") or [])
 
-    candidatos = list(dict.fromkeys(transiciones.get(clave_actual, []) or todas_notas))
+    candidatos = list(dict.fromkeys(transiciones.get(clave_actual, []) or todos_estados))
     if not candidatos:
-        return random.choice(todas_notas)
+        return random.choice(todos_estados)
 
     logits = []
     transiciones_actuales = transiciones.get(clave_actual, [])
-    for nota in candidatos:
-        conteo = transiciones_actuales.count(nota) if transiciones_actuales else 1
+    for estado in candidatos:
+        nota = estado[0] if isinstance(estado, (list, tuple)) and len(estado) >= 1 else estado
+        conteo = transiciones_actuales.count(estado) if transiciones_actuales else 1
         afinidad = _afinidad_tonal(nota, escala_base)
 
         logit = np.log1p(conteo)
@@ -165,13 +199,13 @@ def _elegir_nota_por_temperatura(
 
 def generar_nueva_obra(modelo: dict, longitud_base: int, temperatura: float, orden: int = 2) -> list:
     transiciones = modelo["transiciones"]
-    duraciones   = modelo["duraciones"]
+    estados      = modelo.get("estados", [])
     orden_real   = modelo["orden"]
 
     if not transiciones:
         return []
 
-    todas_notas = list(duraciones.keys())   
+    todas_estados = list(dict.fromkeys(estados))
 
     variacion     = max(1, int(longitud_base * 0.1))
     longitud_final = random.randint(
@@ -180,25 +214,15 @@ def generar_nueva_obra(modelo: dict, longitud_base: int, temperatura: float, ord
     )
 
     clave_inicial = random.choice(list(transiciones.keys()))
-    ventana       = list(clave_inicial)          
-    nueva_sec     = [(n, _dur_para(n, duraciones)) for n in ventana]
+    ventana = list(clave_inicial)
+    nueva_sec = list(ventana)
 
     for _ in range(longitud_final - orden_real):
         clave_actual = tuple(ventana)
 
-        nota_sig = _elegir_nota_por_temperatura(modelo, clave_actual, todas_notas, temperatura)
-
-        prob_desvio_duracion = min(0.75, 0.08 + (temperatura * 0.16))
-        if random.random() < prob_desvio_duracion:
-            todas_durs = [d for ds in duraciones.values() for d in ds]
-            dur_sig    = random.choice(todas_durs) if todas_durs else 0.4
-        else:
-            dur_base = _dur_para(nota_sig, duraciones)
-            ruido    = np.random.normal(0, max(0.04, temperatura * 0.08))
-            dur_sig  = max(0.05, round(dur_base * (1 + ruido), 3))
-
-        nueva_sec.append((nota_sig, dur_sig))
-        ventana = ventana[1:] + [nota_sig]
+        estado_sig = _elegir_estado_por_temperatura(modelo, clave_actual, todas_estados, temperatura)
+        nueva_sec.append(estado_sig)
+        ventana = ventana[1:] + [estado_sig]
 
     return nueva_sec
 
@@ -208,6 +232,13 @@ def _dur_para(nota: str, duraciones: dict) -> float:
         return float(np.median(duraciones[nota]))
     todas = [d for ds in duraciones.values() for d in ds]
     return float(np.median(todas)) if todas else 0.4
+
+
+def _vel_para(nota: str, velocidades: dict) -> float:
+    if nota in velocidades and velocidades[nota]:
+        return float(np.clip(np.median(velocidades[nota]), 0.0, 1.0))
+    todas = [v for vs in velocidades.values() for v in vs]
+    return float(np.clip(np.median(todas), 0.0, 1.0)) if todas else 1.0
 
 
 
@@ -438,6 +469,7 @@ def sintetizar_audio_directo(
         for evento in datos["secuencia"]:
             if isinstance(evento, (list, tuple)) and len(evento) >= 2:
                 nota_str, duracion = evento[0], evento[1]
+                velocidad = float(evento[2]) if len(evento) >= 3 else 1.0
             else:
                 errores_nota += 1
                 continue
@@ -447,6 +479,7 @@ def sintetizar_audio_directo(
                 continue
 
             duracion = max(0.05, float(duracion))
+            velocidad = float(np.clip(velocidad, 0.0, 1.0))
 
             if nota_str == "REST":
                 audio_pista.append(np.zeros(int(sr * duracion), dtype=np.float32))
@@ -462,7 +495,7 @@ def sintetizar_audio_directo(
                     errores_nota += 1
                     continue
                 voces = []
-                amplitud_voces = amplitud_pista / max(1, len(freq))
+                amplitud_voces = (amplitud_pista * velocidad) / max(1, len(freq))
                 for indice, freq_voz in enumerate(freq):
                     freq_detune = float(freq_voz) * (1.0 + 0.0015 * (indice - (len(freq) - 1) / 2.0))
                     voces.append(_sintetizar_nota(freq_detune, duracion, sr, amplitud_voces, perfil))
@@ -470,7 +503,7 @@ def sintetizar_audio_directo(
                 bloque_mezclado /= max(1, len(voces))
                 audio_pista.append(bloque_mezclado)
             else:
-                audio_pista.append(_sintetizar_nota(freq, duracion, sr, amplitud_pista, perfil))
+                audio_pista.append(_sintetizar_nota(freq, duracion, sr, amplitud_pista * velocidad, perfil))
             notas_ok += 1
 
         if audio_pista:

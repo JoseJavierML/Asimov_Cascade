@@ -5,7 +5,7 @@ import numpy as np
 warnings.filterwarnings("ignore")
 
 
-def extraer_adn_desde_audio(ruta_audio: str) -> list[tuple[str, float]]:
+def extraer_adn_desde_audio(ruta_audio: str) -> list[tuple[str, float, float]]:
     import librosa
     from scipy.signal import find_peaks
 
@@ -19,6 +19,11 @@ def extraer_adn_desde_audio(ruta_audio: str) -> list[tuple[str, float]]:
 
     print(f"  [Audio] Cargando: {os.path.basename(ruta_audio)}")
     y, sr = librosa.load(ruta_audio, sr=SR)
+    tempo_estimado, _ = librosa.beat.beat_track(y=y, sr=sr, hop_length=HOP)
+    tempo_estimado = float(np.asarray(tempo_estimado).reshape(-1)[0])
+    if not np.isfinite(tempo_estimado) or tempo_estimado <= 0:
+        tempo_estimado = 120.0
+
     y_harmonic, _ = librosa.effects.hpss(y)
 
     frame_length = 2048
@@ -54,6 +59,7 @@ def extraer_adn_desde_audio(ruta_audio: str) -> list[tuple[str, float]]:
     n_frames = min(cqt.shape[1], len(db_frames))
     cqt = cqt[:, :n_frames]
     db_frames = db_frames[:n_frames]
+    rms = rms[:n_frames]
 
     if len(onsets):
         onsets = np.unique(onsets[onsets < n_frames])
@@ -61,12 +67,53 @@ def extraer_adn_desde_audio(ruta_audio: str) -> list[tuple[str, float]]:
     silencio_frames = db_frames <= UMBRAL_SILENCIO_DB
 
     seg_dur = HOP / SR  
+    negra_segundos = 60.0 / tempo_estimado
+    subduraciones_base = np.array([4.0, 2.0, 1.0, 0.5, 0.25], dtype=float) * negra_segundos
+    rejilla_subdivision = np.unique(
+        np.concatenate(
+            [
+                subduraciones_base,
+                subduraciones_base * 1.5,
+                subduraciones_base * (2.0 / 3.0),
+            ]
+        )
+    )
 
-    secuencia: list[tuple[str, float]] = []
+    secuencia: list[tuple[str, float, float]] = []
 
-    def _agregar_rest(secuencia_local: list[tuple[str, float]], duracion: float):
-        if duracion > 0:
-            secuencia_local.append(("REST", round(duracion, 3)))
+    print(f"  [Audio] Tempo global estimado: {tempo_estimado:.2f} BPM")
+
+    def _cuantizar_duracion(duracion: float) -> float:
+        if duracion <= 0:
+            return 0.0
+
+        return float(rejilla_subdivision[int(np.argmin(np.abs(rejilla_subdivision - duracion)))])
+
+    def _normalizar_velocidades(eventos_crudos: list[tuple[str, float, float]]) -> list[tuple[str, float, float]]:
+        energias = [energia for nota, _dur, energia in eventos_crudos if nota != "REST"]
+        if not energias:
+            return [(nota, dur, 0.0 if nota == "REST" else 1.0) for nota, dur, _energia in eventos_crudos]
+
+        energia_min = float(np.min(energias))
+        energia_max = float(np.max(energias))
+
+        def _velocidad_desde_energia(energia: float) -> float:
+            if energia_max <= energia_min + 1e-12:
+                return 1.0
+            return float(np.clip((energia - energia_min) / (energia_max - energia_min), 0.0, 1.0))
+
+        eventos_normalizados: list[tuple[str, float, float]] = []
+        for nota, dur, energia in eventos_crudos:
+            if nota == "REST":
+                eventos_normalizados.append((nota, dur, 0.0))
+            else:
+                eventos_normalizados.append((nota, dur, _velocidad_desde_energia(energia)))
+        return eventos_normalizados
+
+    def _agregar_rest(secuencia_local: list[tuple[str, float, float]], duracion: float):
+        duracion_cuantizada = _cuantizar_duracion(duracion)
+        if duracion_cuantizada > 0:
+            secuencia_local.append(("REST", round(duracion_cuantizada, 6), 0.0))
 
     def _notas_desde_segmento(inicio: int, fin: int) -> tuple[str, ...] | None:
         if fin <= inicio:
@@ -112,7 +159,7 @@ def extraer_adn_desde_audio(ruta_audio: str) -> list[tuple[str, float]]:
         return tuple(sorted(notas, key=lambda n: librosa.note_to_midi(n)))
 
     def _extraer_con_onsets():
-        secuencia_local: list[tuple[str, float]] = []
+        secuencia_local: list[tuple[str, float, float]] = []
         ultimo_fin = 0
 
         for indice, onset in enumerate(onsets):
@@ -133,16 +180,21 @@ def extraer_adn_desde_audio(ruta_audio: str) -> list[tuple[str, float]]:
             if nota is None or duracion < MIN_DURACION:
                 continue
 
+            energia_inicio = max(0, inicio - 1)
+            energia_fin = min(n_frames, inicio + 3)
+            energia_segmento = float(np.mean(rms[energia_inicio:energia_fin])) if energia_fin > energia_inicio else 0.0
+
             if inicio > ultimo_fin:
                 _agregar_rest(secuencia_local, (inicio - ultimo_fin) * seg_dur)
 
-            secuencia_local.append((nota, round(duracion, 3)))
+            duracion_cuantizada = _cuantizar_duracion(duracion)
+            secuencia_local.append((nota, round(duracion_cuantizada, 6), energia_segmento))
             ultimo_fin = fin
 
-        return secuencia_local
+        return _normalizar_velocidades(secuencia_local)
 
     def _extraer_sin_onsets():
-        secuencia_local: list[tuple[str, float]] = []
+        secuencia_local: list[tuple[str, float, float]] = []
         ultimo_fin = 0
         notas_validas = ~silencio_frames
 
@@ -163,13 +215,16 @@ def extraer_adn_desde_audio(ruta_audio: str) -> list[tuple[str, float]]:
             if nota is None or duracion < MIN_DURACION:
                 continue
 
+            energia_segmento = float(np.mean(rms[inicio:fin])) if fin > inicio else 0.0
+
             if inicio > ultimo_fin:
                 _agregar_rest(secuencia_local, (inicio - ultimo_fin) * seg_dur)
 
-            secuencia_local.append((nota, round(duracion, 3)))
+            duracion_cuantizada = _cuantizar_duracion(duracion)
+            secuencia_local.append((nota, round(duracion_cuantizada, 6), energia_segmento))
             ultimo_fin = fin
 
-        return secuencia_local
+        return _normalizar_velocidades(secuencia_local)
 
     secuencia = _extraer_con_onsets()
     if not secuencia:
