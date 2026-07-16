@@ -6,7 +6,6 @@ import numpy as np
 warnings.filterwarnings("ignore")
 
 
-
 def construir_cadena_markov(secuencia: list, orden: int = 2) -> dict:
     def _normalizar_nota(nota):
         if nota in ("REST", ""):
@@ -52,12 +51,11 @@ def construir_cadena_markov(secuencia: list, orden: int = 2) -> dict:
         estados.append(estado)
 
     n = len(estados)
-
     orden_real = min(orden, max(1, n - 1))
 
     transiciones: dict = {}
     for i in range(n - orden_real):
-        clave     = tuple(estados[i : i + orden_real])
+        clave = tuple(estados[i : i + orden_real])
         siguiente = estados[i + orden_real]
         transiciones.setdefault(clave, []).append(siguiente)
 
@@ -81,7 +79,7 @@ def _notas_desde_evento(nota_str) -> list[int]:
             notas_midi.extend(_notas_desde_evento(elemento))
         return notas_midi
 
-    if nota_str.startswith("Acorde_"):
+    if isinstance(nota_str, str) and nota_str.startswith("Acorde_"):
         partes = nota_str.split("_", 1)[1].split(".")
         notas_midi = []
         for parte in partes:
@@ -150,7 +148,6 @@ def _temperatura_por_fase(
 
     progreso = float(np.clip(progreso, 0.0, 1.0))
 
-    # Exponential easing: very flat at the start, then steep near the end.
     curvatura = 5.0
     exponente = np.clip(curvatura * progreso, 0.0, 50.0)
     denom = np.expm1(curvatura)
@@ -199,15 +196,15 @@ def _elegir_estado_por_temperatura(
 
 def generar_nueva_obra(modelo: dict, longitud_base: int, temperatura: float, orden: int = 2) -> list:
     transiciones = modelo["transiciones"]
-    estados      = modelo.get("estados", [])
-    orden_real   = modelo["orden"]
+    estados = modelo.get("estados", [])
+    orden_real = modelo["orden"]
 
     if not transiciones:
         return []
 
     todas_estados = list(dict.fromkeys(estados))
 
-    variacion     = max(1, int(longitud_base * 0.1))
+    variacion = max(1, int(longitud_base * 0.1))
     longitud_final = random.randint(
         max(orden_real + 1, longitud_base - variacion),
         longitud_base + variacion,
@@ -219,7 +216,6 @@ def generar_nueva_obra(modelo: dict, longitud_base: int, temperatura: float, ord
 
     for _ in range(longitud_final - orden_real):
         clave_actual = tuple(ventana)
-
         estado_sig = _elegir_estado_por_temperatura(modelo, clave_actual, todas_estados, temperatura)
         nueva_sec.append(estado_sig)
         ventana = ventana[1:] + [estado_sig]
@@ -239,7 +235,6 @@ def _vel_para(nota: str, velocidades: dict) -> float:
         return float(np.clip(np.median(velocidades[nota]), 0.0, 1.0))
     todas = [v for vs in velocidades.values() for v in vs]
     return float(np.clip(np.median(todas), 0.0, 1.0)) if todas else 1.0
-
 
 
 _PERFILES = {
@@ -323,6 +318,7 @@ _PERFILES = {
     },
 }
 
+
 def _perfil_instrumento(instrumento) -> dict:
     nombre = ""
     try:
@@ -336,6 +332,28 @@ def _perfil_instrumento(instrumento) -> dict:
     if "organ" in nombre or "harm" in nombre:
         return _PERFILES["organ"]
     return _PERFILES["default"]
+
+
+def _modo_sintesis_pista(nombre_pista: str, instrumento) -> str:
+    nombre = (nombre_pista or "").lower()
+    instrumento_nombre = ""
+    try:
+        instrumento_nombre = (instrumento.instrumentName or "").lower()
+    except Exception:
+        pass
+
+    texto = f"{nombre} {instrumento_nombre}".strip()
+    if "drum" in texto or "perc" in texto or "kit" in texto:
+        return "drums"
+    if "bass" in texto or "sub" in texto:
+        return "bass"
+    if "guitar" in texto or "pluck" in texto:
+        return "guitar"
+    if "piano" in texto or nombre == "master":
+        return "piano"
+    if nombre == "other" or "pad" in texto or "bell" in texto or "synth" in texto:
+        return "other"
+    return "other"
 
 
 def _sintetizar_nota(freq: float, duracion: float, sr: int, amplitud: float, perfil: dict) -> np.ndarray:
@@ -424,8 +442,123 @@ def _sintetizar_nota(freq: float, duracion: float, sr: int, amplitud: float, per
     return (amplitud * senal * envelope).astype(np.float32)
 
 
+def _sintetizar_subbass(freq: float, duracion: float, sr: int, amplitud: float) -> np.ndarray:
+    from scipy.signal import lfilter
+
+    n = max(1, int(sr * duracion))
+    freq = float(np.clip(freq, 20.0, min(sr * 0.22, 220.0)))
+
+    t = np.arange(n, dtype=np.float32) / float(sr)
+    phase = float((freq * 997.0) % (2.0 * np.pi))
+
+    sub = np.sin(2.0 * np.pi * freq * t + phase).astype(np.float32)
+    square = np.sign(np.sin(2.0 * np.pi * freq * 0.5 * t + 0.73 * phase)).astype(np.float32)
+    body = 0.72 * sub + 0.28 * square
+
+    attack = max(1, int(sr * 0.006))
+    release = max(1, int(sr * min(0.20, max(0.04, duracion * 0.35))))
+    ataque = np.linspace(0.0, 1.0, attack, endpoint=False, dtype=np.float32)
+    liberacion = np.ones(n, dtype=np.float32)
+    if release < n:
+        liberacion[-release:] = np.linspace(1.0, 0.0, release, endpoint=True, dtype=np.float32)
+    envolvente = np.ones(n, dtype=np.float32)
+    envolvente[:attack] = ataque
+
+    cuerpo = np.tanh(body * 1.4).astype(np.float32)
+    cuerpo = lfilter([1.0], [1.0, -0.96], cuerpo).astype(np.float32)
+    cuerpo = lfilter([0.22], [1.0, -0.78], cuerpo).astype(np.float32)
+    cuerpo = np.tanh(cuerpo * 1.5).astype(np.float32)
+    return (amplitud * cuerpo * envolvente * liberacion).astype(np.float32)
+
+
+def _sintetizar_pad_bell(freq: float, duracion: float, sr: int, amplitud: float) -> np.ndarray:
+    from scipy.signal import lfilter
+
+    n = max(1, int(sr * duracion))
+    freq = float(np.clip(freq, 20.0, min(sr * 0.35, 5000.0)))
+    t = np.arange(n, dtype=np.float32) / float(sr)
+    rng = np.random.default_rng(int(freq * 7919 + duracion * 1_000_000) & 0xFFFFFFFF)
+
+    attack = max(1, int(sr * 0.12))
+    release = max(1, int(sr * max(0.50, min(2.50, duracion * 0.75))))
+    env = np.exp(-t * 0.65).astype(np.float32)
+    env[:attack] *= np.linspace(0.0, 1.0, attack, endpoint=False, dtype=np.float32)
+    if release < n:
+        env[-release:] *= np.linspace(1.0, 0.0, release, endpoint=True, dtype=np.float32)
+
+    fase1 = rng.uniform(0.0, 2.0 * np.pi)
+    fase2 = rng.uniform(0.0, 2.0 * np.pi)
+    base = np.sin(2.0 * np.pi * freq * t + fase1).astype(np.float32)
+    overtone = 0.48 * np.sin(2.0 * np.pi * freq * 2.01 * t + fase2).astype(np.float32)
+    shimmer = 0.16 * np.sin(2.0 * np.pi * freq * 3.98 * t + 0.5 * fase1).astype(np.float32)
+    nube = base + overtone + shimmer
+
+    ruido = rng.normal(0.0, 1.0, n).astype(np.float32)
+    ruido = lfilter([0.25, 0.25], [1.0], ruido).astype(np.float32)
+    ruido *= np.exp(-t * 10.0).astype(np.float32)
+
+    senal = nube + 0.08 * ruido
+    senal = lfilter([0.18], [1.0, -0.82], senal).astype(np.float32)
+    senal = np.tanh(senal * 1.15).astype(np.float32)
+    return (amplitud * senal * env).astype(np.float32)
+
+
+def _sintetizar_guitarra(freq: float, duracion: float, sr: int, amplitud: float, velocidad: float) -> np.ndarray:
+    from scipy.signal import sawtooth, lfilter
+
+    n = max(1, int(sr * duracion))
+    freq = float(np.clip(freq, 40.0, min(sr * 0.30, 4000.0)))
+    t = np.arange(n, dtype=np.float32) / float(sr)
+    rng = np.random.default_rng(int(freq * 1237 + duracion * 1_000_000) & 0xFFFFFFFF)
+
+    attack = max(1, int(sr * 0.008))
+    release = max(1, int(sr * min(0.30, max(0.05, duracion * 0.45))))
+    env = np.exp(-t * (2.4 + 0.8 * (1.0 - float(np.clip(velocidad, 0.0, 1.0))))).astype(np.float32)
+    env[:attack] *= np.linspace(0.0, 1.0, attack, endpoint=False, dtype=np.float32)
+    if release < n:
+        env[-release:] *= np.linspace(1.0, 0.0, release, endpoint=True, dtype=np.float32)
+
+    pulse = sawtooth(2.0 * np.pi * freq * t, width=0.38).astype(np.float32)
+    body = 0.75 * pulse + 0.18 * np.sin(2.0 * np.pi * freq * 2.0 * t).astype(np.float32)
+    body += 0.05 * rng.normal(0.0, 1.0, n).astype(np.float32)
+    body = lfilter([0.28], [1.0, -0.72], body).astype(np.float32)
+    body = np.tanh(body * 1.25).astype(np.float32)
+    return (amplitud * body * env).astype(np.float32)
+
+
+def _sintetizar_drums(duracion: float, sr: int, amplitud: float, velocidad: float, nota_str=None) -> np.ndarray:
+    import hashlib
+    from scipy.signal import butter, sosfilt
+
+    n = max(1, int(sr * duracion))
+    token = f"{nota_str}|{duracion:.4f}|{float(velocidad):.3f}".encode("utf-8", errors="ignore")
+    seed_base = int.from_bytes(hashlib.sha1(token).digest()[:8], "little")
+    rng = np.random.default_rng(seed_base)
+
+    t = np.arange(n, dtype=np.float32) / float(sr)
+    velocidad = float(np.clip(velocidad, 0.0, 1.0))
+
+    ruido = rng.normal(0.0, 1.0, n).astype(np.float32)
+    if n > 4:
+        sos = butter(3, [180.0 / (sr * 0.5), 7600.0 / (sr * 0.5)], btype="band", output="sos")
+        ruido = sosfilt(sos, ruido).astype(np.float32)
+
+    ataque = max(1, int(sr * 0.0015))
+    decaimiento = max(1, int(sr * max(0.03, min(0.30, duracion * 0.28))))
+    env = np.exp(-t * (18.0 + 18.0 * (1.0 - velocidad))).astype(np.float32)
+    env[:ataque] *= np.linspace(0.0, 1.0, ataque, endpoint=False, dtype=np.float32)
+    if decaimiento < n:
+        env[-decaimiento:] *= np.linspace(1.0, 0.0, decaimiento, endpoint=True, dtype=np.float32)
+
+    golpe = ruido * env
+    golpe += 0.15 * np.sin(2.0 * np.pi * 160.0 * t).astype(np.float32) * env
+    golpe = np.tanh(golpe * (1.0 + 0.9 * velocidad)).astype(np.float32)
+    return (amplitud * golpe).astype(np.float32)
+
+
 def _nota_a_freq(nota_str):
     import librosa
+
     if nota_str in ("REST", ""):
         return None
     try:
@@ -438,13 +571,13 @@ def _nota_a_freq(nota_str):
                 elif freq_elemento is not None:
                     freqs.append(freq_elemento)
             return freqs or None
-        if nota_str.startswith("Acorde_"):
+        if isinstance(nota_str, str) and nota_str.startswith("Acorde_"):
             nums = [int(x) for x in nota_str.split("_")[1].split(".") if x.isdigit()]
             if not nums:
                 return None
             freq = float(librosa.midi_to_hz(min(nums)))
         else:
-            freq = float(librosa.note_to_hz(nota_str))
+            freq = float(librosa.note_to_hz(str(nota_str)))
         return freq if 20 < freq < 20000 else None
     except Exception:
         return None
@@ -460,26 +593,33 @@ def sintetizar_audio_directo(
 
     pistas_audio = []
     errores_nota = 0
-    notas_ok     = 0
+    notas_ok = 0
 
     for nombre_pista, datos in diccionario_pistas.items():
-        perfil     = _perfil_instrumento(datos.get("instrumento"))
+        if isinstance(datos, dict):
+            secuencia = datos.get("secuencia", [])
+            instrumento = datos.get("instrumento")
+        else:
+            secuencia = datos
+            instrumento = None
+
+        perfil = _perfil_instrumento(instrumento)
+        modo_sintesis = _modo_sintesis_pista(nombre_pista, instrumento)
         audio_pista = []
 
-        for evento in datos["secuencia"]:
-            if isinstance(evento, (list, tuple)) and len(evento) >= 2:
-                nota_str, duracion = evento[0], evento[1]
-                velocidad = float(evento[2]) if len(evento) >= 3 else 1.0
-            else:
+        for evento in secuencia:
+            if not isinstance(evento, (list, tuple)) or len(evento) < 2:
                 errores_nota += 1
                 continue
+
+            nota_str = evento[0]
+            duracion = max(0.05, float(evento[1]))
+            velocidad = float(evento[2]) if len(evento) >= 3 else 1.0
+            velocidad = float(np.clip(velocidad, 0.0, 1.0))
 
             if not isinstance(nota_str, (str, tuple, list)):
                 errores_nota += 1
                 continue
-
-            duracion = max(0.05, float(duracion))
-            velocidad = float(np.clip(velocidad, 0.0, 1.0))
 
             if nota_str == "REST":
                 audio_pista.append(np.zeros(int(sr * duracion), dtype=np.float32))
@@ -490,20 +630,53 @@ def sintetizar_audio_directo(
                 errores_nota += 1
                 continue
 
-            if isinstance(freq, list):
-                if not freq:
-                    errores_nota += 1
-                    continue
-                voces = []
-                amplitud_voces = (amplitud_pista * velocidad) / max(1, len(freq))
-                for indice, freq_voz in enumerate(freq):
-                    freq_detune = float(freq_voz) * (1.0 + 0.0015 * (indice - (len(freq) - 1) / 2.0))
-                    voces.append(_sintetizar_nota(freq_detune, duracion, sr, amplitud_voces, perfil))
-                bloque_mezclado = np.sum(voces, axis=0).astype(np.float32)
-                bloque_mezclado /= max(1, len(voces))
-                audio_pista.append(bloque_mezclado)
+            if modo_sintesis == "drums":
+                audio_pista.append(_sintetizar_drums(duracion, sr, amplitud_pista * velocidad, velocidad, nota_str))
+            elif modo_sintesis == "bass":
+                if isinstance(freq, list):
+                    if not freq:
+                        errores_nota += 1
+                        continue
+                    freq = min(freq)
+                audio_pista.append(_sintetizar_subbass(float(freq), duracion, sr, amplitud_pista * 1.15 * velocidad))
+            elif modo_sintesis == "guitar":
+                if isinstance(freq, list):
+                    if not freq:
+                        errores_nota += 1
+                        continue
+                    freq = min(freq)
+                audio_pista.append(_sintetizar_guitarra(float(freq), duracion, sr, amplitud_pista * 0.95 * velocidad, velocidad))
+            elif modo_sintesis == "other":
+                if isinstance(freq, list):
+                    if not freq:
+                        errores_nota += 1
+                        continue
+                    voces = []
+                    amplitud_voces = (amplitud_pista * 0.85 * velocidad) / max(1, len(freq))
+                    for indice, freq_voz in enumerate(freq):
+                        freq_detune = float(freq_voz) * (1.0 + 0.0007 * (indice - (len(freq) - 1) / 2.0))
+                        voces.append(_sintetizar_pad_bell(freq_detune, duracion, sr, amplitud_voces))
+                    bloque_mezclado = np.sum(voces, axis=0).astype(np.float32)
+                    bloque_mezclado /= max(1, len(voces))
+                    audio_pista.append(bloque_mezclado)
+                else:
+                    audio_pista.append(_sintetizar_pad_bell(float(freq), duracion, sr, amplitud_pista * 0.85 * velocidad))
             else:
-                audio_pista.append(_sintetizar_nota(freq, duracion, sr, amplitud_pista * velocidad, perfil))
+                if isinstance(freq, list):
+                    if not freq:
+                        errores_nota += 1
+                        continue
+                    voces = []
+                    amplitud_voces = (amplitud_pista * velocidad) / max(1, len(freq))
+                    for indice, freq_voz in enumerate(freq):
+                        freq_detune = float(freq_voz) * (1.0 + 0.0015 * (indice - (len(freq) - 1) / 2.0))
+                        voces.append(_sintetizar_nota(freq_detune, duracion, sr, amplitud_voces, perfil))
+                    bloque_mezclado = np.sum(voces, axis=0).astype(np.float32)
+                    bloque_mezclado /= max(1, len(voces))
+                    audio_pista.append(bloque_mezclado)
+                else:
+                    audio_pista.append(_sintetizar_nota(float(freq), duracion, sr, amplitud_pista * velocidad, perfil))
+
             notas_ok += 1
 
         if audio_pista:
@@ -520,26 +693,31 @@ def sintetizar_audio_directo(
         )
 
     max_len = max(len(p) for p in pistas_audio)
-    mezcla  = np.zeros(max_len, dtype=np.float32)
-    for p in pistas_audio:
-        mezcla[:len(p)] += p
+    mezcla = np.zeros(max_len, dtype=np.float32)
+    for pista_audio in pistas_audio:
+        mezcla[: len(pista_audio)] += pista_audio
 
-    pico = np.max(np.abs(mezcla))
+    pico = float(np.max(np.abs(mezcla)))
+    if pico > 1.0:
+        mezcla = np.tanh(mezcla).astype(np.float32)
+
+    pico = float(np.max(np.abs(mezcla)))
     if pico > 0:
-        mezcla = mezcla / pico * 0.92
+        mezcla = (mezcla / pico) * 0.92
+
+    mezcla = np.clip(mezcla, -0.98, 0.98).astype(np.float32)
 
     sf.write(nombre_salida, mezcla, sr, subtype="PCM_16")
     print(f"  [Síntesis] ✓ {nombre_salida}  ({len(mezcla)/sr:.1f}s, {notas_ok} notas)")
     return True
 
 
-
 if __name__ == "__main__":
     from memoria_base import extraer_adn_musical
 
-    archivo_input    = "mi_obra.wav"
-    orden_markov     = 2
-    num_fases        = 15
+    archivo_input = "mi_obra.wav"
+    orden_markov = 2
+    num_fases = 15
     temperatura_maxima = 1.80
 
     if not os.path.exists(archivo_input):
@@ -556,7 +734,7 @@ if __name__ == "__main__":
 
             nueva_memoria = {}
             for pista, datos in memoria_actual.items():
-                modelo    = construir_cadena_markov(datos["secuencia"], orden=orden_markov)
+                modelo = construir_cadena_markov(datos["secuencia"], orden=orden_markov)
                 modelo["escala_base"] = datos.get("escala_base") or _escala_desde_secuencia(datos["secuencia"])
                 nueva_sec = generar_nueva_obra(modelo, len(datos["secuencia"]), temperatura, orden=orden_markov)
                 nueva_memoria[pista] = {

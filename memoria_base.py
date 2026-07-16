@@ -5,20 +5,144 @@ import numpy as np
 warnings.filterwarnings("ignore")
 
 
-def extraer_adn_desde_audio(ruta_audio: str) -> list[tuple[str, float, float]]:
+def _aislar_stems_demucs(ruta_audio: str):
+    import importlib.util
+    import pathlib
+    import subprocess
+    import sys
+    import tempfile
+    import traceback
+
+    if importlib.util.find_spec("demucs") is None:
+        print("  [Audio] AVISO: demucs no está instalado; se omite la separación de stems.")
+        return {"master": ruta_audio}, None
+
+    temp_dir = tempfile.TemporaryDirectory(prefix="asimov_demucs_")
+    comando = [
+        sys.executable,
+        "-m",
+        "demucs.separate",
+        "-n",
+        "htdemucs_6s",
+        "--device",
+        "cpu",
+        "--out",
+        temp_dir.name,
+        ruta_audio,
+    ]
+
+    try:
+        resultado = subprocess.run(
+            comando,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+        if resultado.stdout:
+            print("  [Audio] Demucs:", resultado.stdout.splitlines()[-1])
+    except Exception as exc:
+        motivo = "error desconocido"
+        stderr_texto = ""
+        stdout_texto = ""
+
+        if isinstance(exc, subprocess.TimeoutExpired):
+            motivo = "timeout durante la separación"
+            stderr_texto = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+            stdout_texto = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+        elif isinstance(exc, subprocess.CalledProcessError):
+            stderr_texto = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+            stdout_texto = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+            stderr_lower = stderr_texto.lower()
+            if "ffmpeg" in stderr_lower and ("not found" in stderr_lower or "no such file" in stderr_lower):
+                motivo = "FFMPEG no disponible"
+            elif "out of memory" in stderr_lower or "cuda out of memory" in stderr_lower:
+                motivo = "memoria insuficiente (OOM)"
+            else:
+                motivo = f"demucs terminó con código {exc.returncode}"
+        else:
+            motivo = f"{type(exc).__name__}: {exc}"
+
+        print("  [Audio] ===== DIAGNÓSTICO DE FALLO DEMUCS =====")
+        print(f"  [Audio] Comando ejecutado: {' '.join(comando)}")
+        print(f"  [Audio] Motivo detectado: {motivo}")
+        if stdout_texto.strip():
+            print("  [Audio] STDOUT Demucs:")
+            print(stdout_texto.strip())
+        if stderr_texto.strip():
+            print("  [Audio] STDERR Demucs:")
+            print(stderr_texto.strip())
+        print("  [Audio] Traceback completo:")
+        traceback.print_exc()
+        print("  [Audio] !!! ADVERTENCIA CRÍTICA: Demucs abortó; se aplicará fallback a pista master. !!!")
+        temp_dir.cleanup()
+        return {"master": ruta_audio}, None
+
+    stems_retenidos: dict[str, str] = {}
+    for nombre_stem in ("other", "bass", "drums", "piano", "guitar"):
+        candidatos = sorted(pathlib.Path(temp_dir.name).rglob(f"{nombre_stem}.wav"))
+        if candidatos:
+            stems_retenidos[nombre_stem] = str(candidatos[0])
+
+    if not stems_retenidos:
+        print("  [Audio] AVISO: demucs no produjo stems retenidos. Se usará el audio original.")
+        temp_dir.cleanup()
+        return {"master": ruta_audio}, None
+
+    return stems_retenidos, temp_dir
+
+
+def _instrumento_desde_stem(nombre_stem: str):
+    import music21 as m21
+
+    instrumento = m21.instrument.Instrument()
+    if nombre_stem == "piano":
+        instrumento.instrumentName = "Piano"
+    elif nombre_stem == "guitar":
+        instrumento.instrumentName = "Guitar"
+    elif nombre_stem == "other":
+        instrumento.instrumentName = "Pad"
+    elif nombre_stem == "bass":
+        instrumento.instrumentName = "Bass"
+    elif nombre_stem == "drums":
+        instrumento.instrumentName = "Drums"
+    else:
+        instrumento.instrumentName = nombre_stem.title()
+    return instrumento
+
+
+def _log_resumen_eventos_stems(pistas_memoria: dict):
+    for stem, datos_stem in pistas_memoria.items():
+        eventos = datos_stem.get("secuencia", [])
+        total_notas_acordes = sum(1 for nota, _dur, _vel in eventos if nota != "REST")
+        print(
+            f"  [Audio] Stem '{stem}': {len(eventos)} eventos extraídos "
+            f"({total_notas_acordes} notas/acordes)."
+        )
+
+
+def _extraer_superestado_desde_audio(ruta_audio: str, nombre_stem: str) -> list[tuple[str, float, float]]:
     import librosa
     from scipy.signal import find_peaks
 
     HOP = 512
-    SR  = 22050
-    UMBRAL_CONFIANZA = 0.15
-    MIN_DURACION     = 0.05
-    UMBRAL_SILENCIO_DB = -45.0
-    TOL_ONSET_FRAMES   = 1
-    UMBRAL_ONSET_DELTA = 0.08
+    SR = 22050
+    MIN_DURACION = 0.05
+    UMBRAL_SILENCIO_DB = -55.0
+    TOL_ONSET_FRAMES = 1
+    UMBRAL_ONSET_DELTA = 0.03
 
-    print(f"  [Audio] Cargando: {os.path.basename(ruta_audio)}")
-    y, sr = librosa.load(ruta_audio, sr=SR)
+    print(f"  [Audio] {nombre_stem}: cargando {os.path.basename(ruta_audio)}")
+    y_original, sr = librosa.load(ruta_audio, sr=SR)
+    y, trim_idx = librosa.effects.trim(y_original, top_db=50)
+    if y.size == 0:
+        y = y_original
+        trim_idx = np.array([0, len(y_original)], dtype=int)
+
+    frames_recortados = int(trim_idx[0])
+    if frames_recortados > 0:
+        segundos_recortados = frames_recortados / sr
+        print(f"  [Audio] {nombre_stem}: recorte inicial de silencio {segundos_recortados:.3f}s")
     tempo_estimado, _ = librosa.beat.beat_track(y=y, sr=sr, hop_length=HOP)
     tempo_estimado = float(np.asarray(tempo_estimado).reshape(-1)[0])
     if not np.isfinite(tempo_estimado) or tempo_estimado <= 0:
@@ -38,10 +162,10 @@ def extraer_adn_desde_audio(ruta_audio: str) -> list[tuple[str, float, float]]:
         backtrack=False,
         pre_max=1,
         post_max=1,
-        pre_avg=4,
-        post_avg=4,
+        pre_avg=2,
+        post_avg=2,
         delta=UMBRAL_ONSET_DELTA,
-        wait=3,
+        wait=1,
     )
 
     cqt = np.abs(
@@ -66,7 +190,7 @@ def extraer_adn_desde_audio(ruta_audio: str) -> list[tuple[str, float, float]]:
 
     silencio_frames = db_frames <= UMBRAL_SILENCIO_DB
 
-    seg_dur = HOP / SR  
+    seg_dur = HOP / sr
     negra_segundos = 60.0 / tempo_estimado
     subduraciones_base = np.array([4.0, 2.0, 1.0, 0.5, 0.25], dtype=float) * negra_segundos
     rejilla_subdivision = np.unique(
@@ -79,9 +203,7 @@ def extraer_adn_desde_audio(ruta_audio: str) -> list[tuple[str, float, float]]:
         )
     )
 
-    secuencia: list[tuple[str, float, float]] = []
-
-    print(f"  [Audio] Tempo global estimado: {tempo_estimado:.2f} BPM")
+    print(f"  [Audio] {nombre_stem}: tempo global estimado {tempo_estimado:.2f} BPM")
 
     def _cuantizar_duracion(duracion: float) -> float:
         if duracion <= 0:
@@ -117,11 +239,11 @@ def extraer_adn_desde_audio(ruta_audio: str) -> list[tuple[str, float, float]]:
 
     def _notas_desde_segmento(inicio: int, fin: int) -> tuple[str, ...] | None:
         if fin <= inicio:
-            return
+            return None
         energia_segmento = np.mean(cqt[:, inicio:fin], axis=1)
         if not np.any(np.isfinite(energia_segmento)) or float(np.max(energia_segmento)) <= 0:
-            return
-        prominencia_minima = max(float(np.max(energia_segmento)) * 0.03, 1e-8)
+            return None
+        prominencia_minima = max(float(np.max(energia_segmento)) * 0.015, 1e-8)
         picos, propiedades = find_peaks(energia_segmento, prominence=prominencia_minima, distance=1)
 
         candidatos: list[int] = []
@@ -230,10 +352,57 @@ def extraer_adn_desde_audio(ruta_audio: str) -> list[tuple[str, float, float]]:
     if not secuencia:
         secuencia = _extraer_sin_onsets()
 
-    print(f"  [Audio] Extraídos {len(secuencia)} eventos (duración mínima {MIN_DURACION*1000:.0f} ms).")
+    print(f"  [Audio] {nombre_stem}: extraídos {len(secuencia)} eventos (duración mínima {MIN_DURACION*1000:.0f} ms).")
     if len(secuencia) < 10:
         print("  [Audio] AVISO: muy pocas notas detectadas. Prueba con un archivo MIDI para mejores resultados.")
     return secuencia
+
+
+def extraer_adn_desde_audio(ruta_audio: str) -> dict:
+    stems, separacion_tmp = _aislar_stems_demucs(ruta_audio)
+
+    try:
+        if "master" in stems:
+            resultado_master = {
+                "master": {
+                    "instrumento": _instrumento_desde_stem("master"),
+                    "secuencia": _extraer_superestado_desde_audio(stems["master"], "master"),
+                }
+            }
+            _log_resumen_eventos_stems(resultado_master)
+            return resultado_master
+
+        pistas_memoria: dict = {}
+        for nombre_stem in ("piano", "guitar", "other", "bass", "drums"):
+            ruta_stem = stems.get(nombre_stem)
+            if not ruta_stem:
+                continue
+
+            secuencia = _extraer_superestado_desde_audio(ruta_stem, nombre_stem)
+            if not secuencia:
+                continue
+
+            pistas_memoria[nombre_stem] = {
+                "instrumento": _instrumento_desde_stem(nombre_stem),
+                "secuencia": secuencia,
+            }
+
+        if not pistas_memoria:
+            print("  [Audio] AVISO: ningún stem produjo eventos útiles. Se usará el audio original como master.")
+            resultado_master = {
+                "master": {
+                    "instrumento": _instrumento_desde_stem("master"),
+                    "secuencia": _extraer_superestado_desde_audio(ruta_audio, "master"),
+                }
+            }
+            _log_resumen_eventos_stems(resultado_master)
+            return resultado_master
+
+        _log_resumen_eventos_stems(pistas_memoria)
+        return pistas_memoria
+    finally:
+        if separacion_tmp is not None:
+            separacion_tmp.cleanup()
 
 
 def extraer_adn_desde_midi(archivo_midi: str) -> dict:
@@ -245,7 +414,7 @@ def extraer_adn_desde_midi(archivo_midi: str) -> dict:
 
     for i, part in enumerate(partitura.parts):
         instrumento = part.getInstrument()
-        secuencia: list[tuple[str, float]] = []
+        secuencia: list[tuple[str, float, float]] = []
         prev_offset = 0.0
 
         for elemento in part.chordify().flatten().notesAndRests:
@@ -254,17 +423,17 @@ def extraer_adn_desde_midi(archivo_midi: str) -> dict:
 
             gap = offset_actual - prev_offset
             if gap > 0.05:
-                secuencia.append(("REST", round(gap, 3)))
+                secuencia.append(("REST", round(gap, 3), 0.0))
 
             if isinstance(elemento, m21.note.Rest):
-                secuencia.append(("REST", round(duracion_q, 3)))
+                secuencia.append(("REST", round(duracion_q, 3), 0.0))
             elif isinstance(elemento, m21.chord.Chord):
                 notas_acorde = ".".join(
                     str(n.pitch.midi) for n in sorted(elemento.notes, key=lambda x: x.pitch.midi)
                 )
-                secuencia.append((f"Acorde_{notas_acorde}", round(duracion_q, 3)))
+                secuencia.append((f"Acorde_{notas_acorde}", round(duracion_q, 3), 1.0))
             elif isinstance(elemento, m21.note.Note):
-                secuencia.append((str(elemento.pitch), round(duracion_q, 3)))
+                secuencia.append((str(elemento.pitch), round(duracion_q, 3), 1.0))
 
             prev_offset = offset_actual + duracion_q
 
@@ -280,18 +449,10 @@ def extraer_adn_desde_midi(archivo_midi: str) -> dict:
 
 
 def extraer_adn_musical(archivo: str) -> dict:
-    import music21 as m21
-
     ext = os.path.splitext(archivo)[1].lower()
 
     if ext in (".wav", ".mp3"):
-        secuencia = extraer_adn_desde_audio(archivo)
-        return {
-            "Audio_Principal": {
-                "instrumento": m21.instrument.Piano(),
-                "secuencia": secuencia,
-            }
-        }
+        return extraer_adn_desde_audio(archivo)
 
     elif ext in (".mid", ".midi"):
         return extraer_adn_desde_midi(archivo)

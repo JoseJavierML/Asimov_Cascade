@@ -28,7 +28,7 @@ with col_izq:
     uploaded_file = st.file_uploader(
         "Sube tu composición",
         type=["mid", "midi", "wav", "mp3"],
-        help="MIDI recomendado. WAV/MP3 solo funcionan bien con melodías monofónicas (una sola voz).",
+        help="MIDI sigue siendo el formato más estable. WAV/MP3 se separan en stems cuando es posible y ahora admiten material multitrack.",
     )
 
 with col_der:
@@ -53,7 +53,7 @@ with open(ruta_temp, "wb") as fh:
     fh.write(uploaded_file.getbuffer())
 
 es_audio = uploaded_file.name.lower().endswith((".wav", ".mp3"))
-msg = "Analizando audio (puede tardar 30-60 s)…" if es_audio else "Extrayendo ADN del MIDI…"
+msg = "Analizando audio y separando stems (puede tardar 30-60 s)…" if es_audio else "Extrayendo ADN del MIDI…"
 
 with st.spinner(msg):
     try:
