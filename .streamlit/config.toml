@@ -1,0 +1,17 @@
+# Tema oscuro de la Cascada de Asimov.
+# Streamlit lo lee automaticamente desde .streamlit/config.toml, tanto en local
+# como dentro del contenedor Docker (el Dockerfile hace COPY . .).
+
+[theme]
+base = "dark"
+primaryColor = "#6366f1"
+backgroundColor = "#030303"
+secondaryBackgroundColor = "#0d0d12"
+textColor = "#9ca3af"
+font = "sans serif"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false
