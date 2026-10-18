@@ -509,8 +509,11 @@ def _sintetizar_nota(freq: float, duracion: float, sr: int, amplitud: float, per
     mod_index = float(perfil.get("mod_index", 4.0))
     mod_decay = float(perfil.get("mod_decay", 3.0))
     amp_decay = float(perfil.get("amp_decay", 2.0))
-    attack = max(1, int(sr * float(perfil.get("attack", 0.008))))
-    release = max(1, int(sr * float(perfil.get("release", 0.16))))
+    # Las envolventes no pueden medir mas que la propia nota. Sin este min(),
+    # cualquier evento corto (la extraccion de audio produce notas de 50 ms)
+    # provoca un ValueError de difusion en np.linspace.
+    attack = min(max(1, int(sr * float(perfil.get("attack", 0.008)))), n)
+    release = min(max(1, int(sr * float(perfil.get("release", 0.16)))), n)
     noise_mix = float(perfil.get("noise_mix", 0.04))
     body_mix = float(perfil.get("body_mix", 0.22))
     detune_cents = float(perfil.get("detune_cents", 0.0))
@@ -592,8 +595,8 @@ def _sintetizar_subbass(freq: float, duracion: float, sr: int, amplitud: float) 
     square = np.sign(np.sin(2.0 * np.pi * freq * 0.5 * t + 0.73 * phase)).astype(np.float32)
     body = 0.72 * sub + 0.28 * square
 
-    attack = max(1, int(sr * 0.006))
-    release = max(1, int(sr * min(0.20, max(0.04, duracion * 0.35))))
+    attack = min(max(1, int(sr * 0.006)), n)
+    release = min(max(1, int(sr * min(0.20, max(0.04, duracion * 0.35)))), n)
     ataque = np.linspace(0.0, 1.0, attack, endpoint=False, dtype=np.float32)
     liberacion = np.ones(n, dtype=np.float32)
     if release < n:
@@ -616,8 +619,8 @@ def _sintetizar_pad_bell(freq: float, duracion: float, sr: int, amplitud: float)
     t = np.arange(n, dtype=np.float32) / float(sr)
     rng = np.random.default_rng(int(freq * 7919 + duracion * 1_000_000) & 0xFFFFFFFF)
 
-    attack = max(1, int(sr * 0.12))
-    release = max(1, int(sr * max(0.50, min(2.50, duracion * 0.75))))
+    attack = min(max(1, int(sr * 0.12)), n)
+    release = min(max(1, int(sr * max(0.50, min(2.50, duracion * 0.75)))), n)
     env = np.exp(-t * 0.65).astype(np.float32)
     env[:attack] *= np.linspace(0.0, 1.0, attack, endpoint=False, dtype=np.float32)
     if release < n:
@@ -648,8 +651,8 @@ def _sintetizar_guitarra(freq: float, duracion: float, sr: int, amplitud: float,
     t = np.arange(n, dtype=np.float32) / float(sr)
     rng = np.random.default_rng(int(freq * 1237 + duracion * 1_000_000) & 0xFFFFFFFF)
 
-    attack = max(1, int(sr * 0.008))
-    release = max(1, int(sr * min(0.30, max(0.05, duracion * 0.45))))
+    attack = min(max(1, int(sr * 0.008)), n)
+    release = min(max(1, int(sr * min(0.30, max(0.05, duracion * 0.45)))), n)
     env = np.exp(-t * (2.4 + 0.8 * (1.0 - float(np.clip(velocidad, 0.0, 1.0))))).astype(np.float32)
     env[:attack] *= np.linspace(0.0, 1.0, attack, endpoint=False, dtype=np.float32)
     if release < n:
@@ -680,8 +683,8 @@ def _sintetizar_drums(duracion: float, sr: int, amplitud: float, velocidad: floa
         sos = butter(3, [180.0 / (sr * 0.5), 7600.0 / (sr * 0.5)], btype="band", output="sos")
         ruido = sosfilt(sos, ruido).astype(np.float32)
 
-    ataque = max(1, int(sr * 0.0015))
-    decaimiento = max(1, int(sr * max(0.03, min(0.30, duracion * 0.28))))
+    ataque = min(max(1, int(sr * 0.0015)), n)
+    decaimiento = min(max(1, int(sr * max(0.03, min(0.30, duracion * 0.28)))), n)
     env = np.exp(-t * (18.0 + 18.0 * (1.0 - velocidad))).astype(np.float32)
     env[:ataque] *= np.linspace(0.0, 1.0, ataque, endpoint=False, dtype=np.float32)
     if decaimiento < n:

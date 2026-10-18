@@ -37,6 +37,11 @@ def _aislar_stems_demucs(ruta_audio: str):
             check=True,
             capture_output=True,
             text=True,
+            # Demucs escribe en UTF-8. Sin esto, la consola de Windows en cp1252
+            # lanza UnicodeDecodeError en el hilo lector de subprocess y se
+            # pierden justamente los diagnosticos que sirven para depurar.
+            encoding="utf-8",
+            errors="replace",
             timeout=900,
         )
         if resultado.stdout:

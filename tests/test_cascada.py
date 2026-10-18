@@ -505,6 +505,51 @@ def test_sintetizar_audio_directo_no_rompio_la_interfaz():
 
 
 @test
+def test_notas_cortisimas_no_reventan_la_sintesis():
+    """La extraccion de audio produce notas de 50 ms; el ataque medido 120 ms
+    reventaba con ValueError de difusion en los cinco sintetizadores."""
+    import soundfile as sf
+    from motor_generativo import sintetizar_audio_directo
+
+    modos = ["piano", "bass", "guitar", "other", "drums"]
+    with tempfile.TemporaryDirectory() as tmp:
+        for modo in modos:
+            salida = os.path.join(tmp, f"{modo}.wav")
+            # 50 ms es el minimo que produce la extraccion de audio real
+            secuencia = [((60,), 0.05, 0.8), ((64,), 0.06, 0.6),
+                         ((67,), 0.05, 0.7), ((62,), 0.04, 0.5)] * 5
+            ok = sintetizar_audio_directo(
+                {"piano": {"instrumento": None, "secuencia": secuencia,
+                           "modo_sintesis": modo}},
+                salida,
+            )
+            assert ok is True, modo
+            audio, sr = sf.read(salida)
+            assert len(audio) > 0, modo
+            assert np.max(np.abs(audio)) <= 1.0, modo
+
+
+@test
+def test_duracion_menor_que_el_ataque_en_todos_los_modos():
+    """Un evento mas corto que su propia envolvente debe renderizarse igual."""
+    import soundfile as sf
+    from motor_generativo import sintetizar_audio_directo
+
+    for modo in ["piano", "bass", "guitar", "other", "drums"]:
+        with tempfile.TemporaryDirectory() as tmp:
+            salida = os.path.join(tmp, "x.wav")
+            sintetizar_audio_directo(
+                {"p": {"instrumento": None,
+                       "secuencia": [((60,), 0.01, 1.0)], "modo_sintesis": modo}},
+                salida,
+            )
+            audio, sr = sf.read(salida)
+            # sintetizar_audio_directo aplica un suelo de 50 ms por evento
+            esperado = int(0.05 * 44100)
+            assert abs(len(audio) - esperado) <= 2, (modo, len(audio), esperado)
+
+
+@test
 def test_cascada_completa_no_revienta():
     import tempfile
     import soundfile as sf
