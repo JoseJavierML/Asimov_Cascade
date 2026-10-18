@@ -121,7 +121,7 @@ def _log_resumen_eventos_stems(pistas_memoria: dict):
         )
 
 
-def _extraer_superestado_desde_audio(ruta_audio: str, nombre_stem: str) -> list[tuple[str, float, float]]:
+def _extraer_superestado_desde_audio(ruta_audio: str, nombre_stem: str):
     import librosa
     from scipy.signal import find_peaks
 
@@ -355,7 +355,7 @@ def _extraer_superestado_desde_audio(ruta_audio: str, nombre_stem: str) -> list[
     print(f"  [Audio] {nombre_stem}: extraídos {len(secuencia)} eventos (duración mínima {MIN_DURACION*1000:.0f} ms).")
     if len(secuencia) < 10:
         print("  [Audio] AVISO: muy pocas notas detectadas. Prueba con un archivo MIDI para mejores resultados.")
-    return secuencia
+    return secuencia, round(float(tempo_estimado), 3)
 
 
 def extraer_adn_desde_audio(ruta_audio: str) -> dict:
@@ -363,10 +363,12 @@ def extraer_adn_desde_audio(ruta_audio: str) -> dict:
 
     try:
         if "master" in stems:
+            secuencia_master, bpm_master = _extraer_superestado_desde_audio(stems["master"], "master")
             resultado_master = {
                 "master": {
                     "instrumento": _instrumento_desde_stem("master"),
-                    "secuencia": _extraer_superestado_desde_audio(stems["master"], "master"),
+                    "secuencia": secuencia_master,
+                    "bpm": bpm_master,
                 }
             }
             _log_resumen_eventos_stems(resultado_master)
@@ -378,21 +380,24 @@ def extraer_adn_desde_audio(ruta_audio: str) -> dict:
             if not ruta_stem:
                 continue
 
-            secuencia = _extraer_superestado_desde_audio(ruta_stem, nombre_stem)
+            secuencia, bpm_stem = _extraer_superestado_desde_audio(ruta_stem, nombre_stem)
             if not secuencia:
                 continue
 
             pistas_memoria[nombre_stem] = {
                 "instrumento": _instrumento_desde_stem(nombre_stem),
                 "secuencia": secuencia,
+                "bpm": bpm_stem,
             }
 
         if not pistas_memoria:
             print("  [Audio] AVISO: ningún stem produjo eventos útiles. Se usará el audio original como master.")
+            secuencia_master, bpm_master = _extraer_superestado_desde_audio(ruta_audio, "master")
             resultado_master = {
                 "master": {
                     "instrumento": _instrumento_desde_stem("master"),
-                    "secuencia": _extraer_superestado_desde_audio(ruta_audio, "master"),
+                    "secuencia": secuencia_master,
+                    "bpm": bpm_master,
                 }
             }
             _log_resumen_eventos_stems(resultado_master)
@@ -405,16 +410,113 @@ def extraer_adn_desde_audio(ruta_audio: str) -> dict:
             separacion_tmp.cleanup()
 
 
+def _velocidad_midi(elemento) -> float:
+    """Dinamica real de una nota MIDI, normalizada a 0..1.
+
+    Antes se fijaba siempre en 1.0, lo que hacia que el tercer campo del
+    Super-Estado (Velocidad_RMS) fuera ficticio en toda la ruta MIDI. Se
+    normaliza como en la ruta de audio, donde ya venia en 0..1.
+    """
+    import music21 as m21
+
+    if isinstance(elemento, m21.note.Rest):
+        return 0.0
+
+    try:
+        valor = elemento.volume.velocity
+        if valor is None:
+            return 1.0
+        midi = float(getattr(valor, "velocity", valor))
+    except Exception:
+        return 1.0
+
+    if not (0.0 <= midi <= 127.0):
+        return 1.0
+    return round(float(min(1.0, max(0.05, midi / 127.0))), 4)
+
+
+def _mapa_tempo_musical(partitura) -> list:
+    """Extrae el mapa de tempo del MIDI como [(offset_cuadradas, segundos_por_cuadrada)].
+
+    music21 guarda el tempo como marcas (MetronomeMark) que pueden cambiar a
+    mitad de la obra. Se ordenan e incluyen el origen en la posicion 0.
+    Sin marcas se asume 120 BPM, que es la convencion MIDI estandar.
+    """
+    import music21 as m21
+
+    marcas: list = []
+    try:
+        for marca in partitura.flatten().getElementsByClass(m21.tempo.MetronomeMark):
+            bpm = float(marca.number) if marca.number else 0.0
+            if bpm <= 0:
+                continue
+            referencia = marca.referent
+            ref_cuadradas = float(referencia.quarterLength) if referencia is not None else 1.0
+            if ref_cuadradas <= 0:
+                ref_cuadradas = 1.0
+            marcas.append((float(marca.offset), 60.0 * ref_cuadradas / bpm))
+    except Exception:
+        marcas = []
+
+    marcas = sorted({(round(offset, 6), round(segundos, 9)) for offset, segundos in marcas})
+
+    if not marcas or marcas[0][0] > 0:
+        marcas.insert(0, (0.0, 0.5))  # 120 BPM hasta el primer cambio
+
+    return marcas
+
+
+def _segundos_por_cuadrada(mapa: list, offset: float) -> float:
+    valor = mapa[0][1]
+    for posicion, segundos in mapa:
+        if posicion <= offset:
+            valor = segundos
+        else:
+            break
+    return valor
+
+
+def _duracion_en_segundos(mapa: list, inicio: float, duracion_cuadradas: float) -> float:
+    """Convierte duracion en negras a segundos, integrando cambios de tempo.
+
+    Una nota que cruza un cambio de tempo se divide en tramos y cada tramo usa
+    el tempo que estava vigente. Sin esto, un MIDI con accelerando se
+    estiraria o se comprimiria de forma incorrecta.
+    """
+    if duracion_cuadradas <= 0:
+        return 0.0
+
+    fin = inicio + duracion_cuadradas
+    cortes = [inicio] + [pos for pos, _ in mapa if inicio < pos < fin] + [fin]
+
+    total = 0.0
+    for tramo_a, tramo_b in zip(cortes[:-1], cortes[1:]):
+        if tramo_b <= tramo_a:
+            continue
+        total += (tramo_b - tramo_a) * _segundos_por_cuadrada(mapa, tramo_a)
+    return total
+
+
 def extraer_adn_desde_midi(archivo_midi: str) -> dict:
     import music21 as m21
 
     print(f"  [MIDI] Leyendo: {os.path.basename(archivo_midi)}")
     partitura = m21.converter.parse(archivo_midi)
+    mapa_tempo = _mapa_tempo_musical(partitura)
+    segundos_por_cuadrada = mapa_tempo[0][1]
+    bpm_principal = 60.0 / segundos_por_cuadrada if segundos_por_cuadrada > 0 else 120.0
+
+    if len(mapa_tempo) > 1:
+        print(f"  [MIDI] Mapa de tempo: {len(mapa_tempo)} marcas (principal {bpm_principal:.1f} BPM)")
+    else:
+        print(f"  [MIDI] Tempo detectado: {bpm_principal:.1f} BPM "
+              f"({segundos_por_cuadrada:.4f} s por negra)")
+
     pistas_memoria: dict = {}
 
     for i, part in enumerate(partitura.parts):
         instrumento = part.getInstrument()
-        secuencia: list[tuple[str, float, float]] = []
+        secuencia: list = []
         prev_offset = 0.0
 
         for elemento in part.chordify().flatten().notesAndRests:
@@ -423,17 +525,21 @@ def extraer_adn_desde_midi(archivo_midi: str) -> dict:
 
             gap = offset_actual - prev_offset
             if gap > 0.05:
-                secuencia.append(("REST", round(gap, 3), 0.0))
+                gap_seg = _duracion_en_segundos(mapa_tempo, prev_offset, gap)
+                secuencia.append(("REST", round(gap_seg, 4), 0.0))
+
+            duracion_seg = _duracion_en_segundos(mapa_tempo, offset_actual, duracion_q)
+            velocidad = _velocidad_midi(elemento)
 
             if isinstance(elemento, m21.note.Rest):
-                secuencia.append(("REST", round(duracion_q, 3), 0.0))
+                secuencia.append(("REST", round(duracion_seg, 4), 0.0))
             elif isinstance(elemento, m21.chord.Chord):
                 notas_acorde = ".".join(
                     str(n.pitch.midi) for n in sorted(elemento.notes, key=lambda x: x.pitch.midi)
                 )
-                secuencia.append((f"Acorde_{notas_acorde}", round(duracion_q, 3), 1.0))
+                secuencia.append((f"Acorde_{notas_acorde}", round(duracion_seg, 4), velocidad))
             elif isinstance(elemento, m21.note.Note):
-                secuencia.append((str(elemento.pitch), round(duracion_q, 3), 1.0))
+                secuencia.append((str(elemento.pitch), round(duracion_seg, 4), velocidad))
 
             prev_offset = offset_actual + duracion_q
 
@@ -442,8 +548,12 @@ def extraer_adn_desde_midi(archivo_midi: str) -> dict:
             pistas_memoria[f"Pista_{i}_{nombre_inst}"] = {
                 "instrumento": instrumento,
                 "secuencia": secuencia,
+                "bpm": bpm_principal,
+                "segundos_por_cuadrada": segundos_por_cuadrada,
             }
-            print(f"  [MIDI] Pista {i} ({nombre_inst}): {len(secuencia)} eventos.")
+            total_seg = sum(float(d) for _n, d, _v in secuencia)
+            print(f"  [MIDI] Pista {i} ({nombre_inst}): {len(secuencia)} eventos "
+                  f"({total_seg:.1f}s a {bpm_principal:.1f} BPM)")
 
     return pistas_memoria
 

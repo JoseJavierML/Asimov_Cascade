@@ -782,6 +782,7 @@ if __name__ == "__main__":
                     "instrumento": datos["instrumento"],
                     "secuencia": nueva_sec,
                     "escala_base": modelo["escala_base"],
+                    "bpm": datos.get("bpm"),
                 }
 
             sintetizar_audio_directo(nueva_memoria, f"Fase_{f:02d}_Audio.wav")

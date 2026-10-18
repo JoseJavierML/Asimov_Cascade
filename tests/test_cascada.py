@@ -8,6 +8,7 @@ Cada test documenta un fallo concreto que ya ocurria y que no debe volver.
 """
 import os
 import sys
+import tempfile
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if RAIZ not in sys.path:
@@ -153,9 +154,109 @@ def test_afinidades_se_cargan_una_vez_y_se_reutilizan():
     assert transcurrido < 5.0, f"generacion demasiado lenta: {transcurrido:.2f}s"
 
 
+# --------------------------------------------------------------------------
+# Bloque 2: reloj temporal. El MIDI guardaba duraciones en negras, y el
+# sintetizador las trataba como segundos, así que todo sonaba a 60 BPM.
+# --------------------------------------------------------------------------
+
+def _midi_de_prueba(ruta, bpm, negras=4, cambio_tempo=None):
+    import music21 as m21
+
+    score = m21.stream.Score()
+    parte = m21.stream.Part()
+    parte.append(m21.instrument.Piano())
+    for i in range(negras):
+        nota = m21.note.Note("C4")
+        nota.quarterLength = 1.0
+        nota.volume.velocity = 64 + i * 15
+        parte.append(nota)
+    score.insert(0, parte)
+    score.insert(0, m21.tempo.MetronomeMark(number=bpm))
+    if cambio_tempo:
+        score.insert(0, m21.tempo.MetronomeMark(number=cambio_tempo[1]))
+        score.getElementsByClass(m21.tempo.MetronomeMark)[1].offset = cambio_tempo[0]
+    score.write("midi", fp=ruta)
+    return ruta
+
+
+@test
+def test_duracion_midi_respeta_el_tempo():
+    """Bug C: 4 negras a 120 BPM duran 2.0 s, no 4.0 s."""
+    from memoria_base import extraer_adn_musical
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ruta = _midi_de_prueba(os.path.join(tmp, "t.mid"), bpm=120, negras=4)
+        memoria = extraer_adn_musical(ruta)
+        total = sum(float(d) for pista in memoria.values() for _n, d, _v in pista["secuencia"])
+        assert abs(total - 2.0) < 0.05, f"esperaba 2.0s, obtuve {total:.3f}s"
+
+
+@test
+def test_tempos_distintos_dan_duraciones_distintas():
+    from memoria_base import extraer_adn_musical
+
+    with tempfile.TemporaryDirectory() as tmp:
+        lentas = extraer_adn_musical(_midi_de_prueba(os.path.join(tmp, "lenta.mid"), bpm=60, negras=4))
+        rapidas = extraer_adn_musical(_midi_de_prueba(os.path.join(tmp, "rapida.mid"), bpm=180, negras=4))
+        t_lenta = sum(float(d) for p in lentas.values() for _n, d, _v in p["secuencia"])
+        t_rapida = sum(float(d) for p in rapidas.values() for _n, d, _v in p["secuencia"])
+        assert abs(t_lenta - 4.0) < 0.05, t_lenta
+        assert abs(t_rapida - 1.333) < 0.05, t_rapida
+
+
+@test
+def test_bpm_queda_registrado_en_la_memoria():
+    from memoria_base import extraer_adn_musical
+
+    with tempfile.TemporaryDirectory() as tmp:
+        memoria = extraer_adn_musical(_midi_de_prueba(os.path.join(tmp, "b.mid"), bpm=140, negras=2))
+        for pista in memoria.values():
+            assert abs(pista["bpm"] - 140.0) < 0.5, pista.get("bpm")
+
+
+@test
+def test_cambio_de_tempo_se_integra_en_la_duracion():
+    """Una nota que cruza un accelerando debe integrar ambos tramos."""
+    from memoria_base import _duracion_en_segundos
+
+    mapa = [(0.0, 0.5), (4.0, 0.25)]  # 120 BPM, luego 240 BPM
+    total = _duracion_en_segundos(mapa, 2.0, 4.0)  # 2 negras a 120 + 2 a 240
+    assert abs(total - 1.5) < 1e-6, total
+
+
+@test
+def test_velocidad_midi_se_recupera():
+    """Bug 4: la velocidad era siempre 1.0 y las dinamicas eran ficticias."""
+    from memoria_base import extraer_adn_musical
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ruta = _midi_de_prueba(os.path.join(tmp, "v.mid"), bpm=120, negras=4)
+        memoria = extraer_adn_musical(ruta)
+        velocidades = [v for pista in memoria.values() for _n, _d, v in pista["secuencia"] if v > 0]
+        assert len(set(velocidades)) >= 3, velocidades
+        assert all(0.0 < v <= 1.0 for v in velocidades), velocidades
+
+
+@test
+def test_sintesis_respeta_el_tempo_real():
+    """El audio generado debe durar lo que dura la obra original."""
+    import soundfile as sf
+    from memoria_base import extraer_adn_musical
+    from motor_generativo import sintetizar_audio_directo
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ruta = _midi_de_prueba(os.path.join(tmp, "x.mid"), bpm=120, negras=8)
+        memoria = extraer_adn_musical(ruta)
+        esperado = sum(float(d) for p in memoria.values() for _n, d, _v in p["secuencia"])
+
+        salida = os.path.join(tmp, "salida.wav")
+        sintetizar_audio_directo(memoria, salida)
+        audio, sr = sf.read(salida)
+        assert abs(len(audio) / sr - esperado) < 0.1, f"audio {len(audio)/sr:.2f}s vs esperado {esperado:.2f}s"
+
+
 @test
 def test_cascada_completa_no_revienta():
-    """Humo: 6 fases con acordes deben terminar y producir audio."""
     import tempfile
     import soundfile as sf
 
