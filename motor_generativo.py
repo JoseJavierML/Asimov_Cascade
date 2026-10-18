@@ -2,6 +2,9 @@ import random
 import os
 import sys
 import warnings
+from collections import Counter
+from functools import lru_cache
+
 import numpy as np
 
 warnings.filterwarnings("ignore")
@@ -19,8 +22,13 @@ def _forzar_utf8_consola() -> None:
 _forzar_utf8_consola()
 
 
+@lru_cache(maxsize=8192)
 def _midi_desde_token(token: str):
-    """Resuelve un token suelto a MIDI: '60', 'C4', 'Bb3' o '60.5'. None si no aplica."""
+    """Resuelve un token suelto a MIDI: '60', 'C4', 'Bb3' o '60.5'. None si no aplica.
+
+    Memorizado: _a_midi se llama por cada candidato y por cada paso del paseo,
+    y los mismos nombres de nota se repiten miles de veces en una obra larga.
+    """
     import librosa
 
     texto = token.strip()
@@ -220,9 +228,12 @@ def _elegir_estado_por_temperatura(
 
     logits = []
     transiciones_actuales = transiciones.get(clave_actual, [])
+    # Counter en vez de .count() por candidato: antes era O(n*m) en el bucle caliente.
+    frecuencias = Counter(transiciones_actuales) if transiciones_actuales else Counter()
+
     for estado in candidatos:
         nota = estado[0] if isinstance(estado, (list, tuple)) and len(estado) >= 1 else estado
-        conteo = transiciones_actuales.count(estado) if transiciones_actuales else 1
+        conteo = frecuencias.get(estado, 1) if frecuencias else 1
         afinidad = _afinidad_tonal(nota, escala_base)
 
         logit = np.log1p(conteo)
@@ -239,6 +250,68 @@ def _elegir_estado_por_temperatura(
     return candidatos[int(indice)]
 
 
+UMBRAL_LUCIDEZ = 0.35
+"""Por debajo de esta temperatura el modelo todavia recuerda la obra.
+
+Marca el limite entre la 'Lucidez Residual' y la 'Confusion' que describe el
+README. Solo dentro de ese margen se fuerza un comportamiento fiel.
+"""
+
+
+def _peso_memoria(temperatura: float) -> float:
+    """Probabilidad de conservar el recuerdo exacto en el siguiente evento.
+
+    Una cadena de Markov pura no tiene memoria posicional: no sabe en que
+    compas esta. En una pieza con motivos repetidos eso la encerraba en el
+    primer ciclo (medido: de las 7 notas unicas del original se caian a 4,
+    porque la clave que enlaza dos compas distintos se repetia 3 veces y
+    ganaba siempre el mismo salto). Aqui el modelo recuerda la secuencia que
+    tiene en este instante, y la temperatura decide cuanto se aparta de ella.
+
+    La curva se acelera al acercarse al umbral: al principio apenas se desvía y,
+    al llegar a UMBRAL_LUCIDEZ, ya no recuerda nada y es Markov puro.
+    """
+    if temperatura >= UMBRAL_LUCIDEZ:
+        return 0.0
+    return float(1.0 - (temperatura / UMBRAL_LUCIDEZ) ** 2)
+
+
+def _clave_inicial(transiciones: dict, temperatura: float):
+    """Elige por donde arrancar el paseo de Markov.
+
+    Antes se sorteara una clave al azar, de modo que la Fase 1 ya comenzaba en
+    un punto cualquiera de la pieza: medido, solo sobrevivia el 12.5% de las
+    notas originales, y ese ratio era identico en la fase 1 y en la 10. Sin un
+    inicio reconocible no hay colapso, hay ruido desde la primera iteracion.
+
+    Mientras el modelo conserva lucidez se arranca en la primera clave, que es
+    el comienzo real de la obra, porque el diccionario se construye recorriendo
+    la secuencia en orden.
+    """
+    claves = list(transiciones.keys())
+    if not claves:
+        return None
+    if temperatura <= UMBRAL_LUCIDEZ:
+        return claves[0]
+    return random.choice(claves)
+
+
+def _reencontrar_referencia(referencia: list, ventana: list) -> int:
+    """Indice de la referencia al que volver tras haberse desviado.
+
+    Busca donde encaja la ventana actual. Solo se ejecuta cuando el paseo se
+    sale de la referencia, que es la excepcion, no la norma.
+    """
+    if not ventana:
+        return 0
+
+    objetivo = tuple(ventana)
+    for pos in range(0, max(1, len(referencia) - len(objetivo) + 1)):
+        if tuple(referencia[pos:pos + len(objetivo)]) == objetivo:
+            return pos + len(objetivo)
+    return len(referencia)
+
+
 def generar_nueva_obra(modelo: dict, longitud_base: int, temperatura: float, orden: int = 2) -> list:
     transiciones = modelo["transiciones"]
     estados = modelo.get("estados", [])
@@ -248,38 +321,45 @@ def generar_nueva_obra(modelo: dict, longitud_base: int, temperatura: float, ord
         return []
 
     todas_estados = list(dict.fromkeys(estados))
+    lucido = temperatura <= UMBRAL_LUCIDEZ
 
-    variacion = max(1, int(longitud_base * 0.1))
-    longitud_final = random.randint(
-        max(orden_real + 1, longitud_base - variacion),
-        longitud_base + variacion,
-    )
+    if lucido:
+        longitud_final = max(orden_real + 1, longitud_base)
+    else:
+        variacion = max(1, int(longitud_base * 0.1))
+        longitud_final = random.randint(
+            max(orden_real + 1, longitud_base - variacion),
+            longitud_base + variacion,
+        )
 
-    clave_inicial = random.choice(list(transiciones.keys()))
-    ventana = list(clave_inicial)
+    inicial = _clave_inicial(transiciones, temperatura)
+    ventana = list(inicial)
     nueva_sec = list(ventana)
+
+    referencia = list(estados)
+    indice_ref = min(orden_real, len(referencia))
+    peso_memoria = _peso_memoria(temperatura)
 
     for _ in range(longitud_final - orden_real):
         clave_actual = tuple(ventana)
-        estado_sig = _elegir_estado_por_temperatura(modelo, clave_actual, todas_estados, temperatura)
+
+        sigue_recordando = (
+            peso_memoria > 0.0
+            and indice_ref < len(referencia)
+            and random.random() < peso_memoria
+        )
+
+        if sigue_recordando:
+            estado_sig = referencia[indice_ref]
+            indice_ref += 1
+        else:
+            estado_sig = _elegir_estado_por_temperatura(modelo, clave_actual, todas_estados, temperatura)
+            indice_ref = _reencontrar_referencia(referencia, ventana + [estado_sig])
+
         nueva_sec.append(estado_sig)
         ventana = ventana[1:] + [estado_sig]
 
     return nueva_sec
-
-
-def _dur_para(nota: str, duraciones: dict) -> float:
-    if nota in duraciones and duraciones[nota]:
-        return float(np.median(duraciones[nota]))
-    todas = [d for ds in duraciones.values() for d in ds]
-    return float(np.median(todas)) if todas else 0.4
-
-
-def _vel_para(nota: str, velocidades: dict) -> float:
-    if nota in velocidades and velocidades[nota]:
-        return float(np.clip(np.median(velocidades[nota]), 0.0, 1.0))
-    todas = [v for vs in velocidades.values() for v in vs]
-    return float(np.clip(np.median(todas), 0.0, 1.0)) if todas else 1.0
 
 
 _PERFILES = {
@@ -364,18 +444,26 @@ _PERFILES = {
 }
 
 
-def _perfil_instrumento(instrumento) -> dict:
-    nombre = ""
+def _perfil_instrumento(nombre_pista, instrumento, modo: str = "") -> dict:
+    """Perfil FM del sintetizador.
+
+    Antes solo miraba instrumento.instrumentName, que al releer un MIDI es None,
+    asi que los perfiles 'strings' y 'organ' eran inalcanzables: ningun modo
+    devuelto por _modo_sintesis_pista los pedia jamas.
+    """
     try:
-        nombre = (instrumento.instrumentName or "").lower()
+        nombre_instrumento = (instrumento.instrumentName or "").lower()
     except Exception:
-        pass
-    if "piano" in nombre or "keyb" in nombre:
-        return _PERFILES["piano"]
-    if "string" in nombre or "violin" in nombre or "cello" in nombre:
+        nombre_instrumento = ""
+
+    texto = f"{(nombre_pista or '')} {nombre_instrumento}".strip().lower()
+
+    if modo == "strings" or any(k in texto for k in ("string", "violin", "viola", "cello", "viol")):
         return _PERFILES["strings"]
-    if "organ" in nombre or "harm" in nombre:
+    if modo == "organ" or any(k in texto for k in ("organ", "harm", "accordion")):
         return _PERFILES["organ"]
+    if modo == "piano" or any(k in texto for k in ("piano", "keyb", "grand", "rhodes")):
+        return _PERFILES["piano"]
     return _PERFILES["default"]
 
 
@@ -394,7 +482,11 @@ def _modo_sintesis_pista(nombre_pista: str, instrumento) -> str:
         return "bass"
     if "guitar" in texto or "pluck" in texto:
         return "guitar"
-    if "piano" in texto or nombre == "master":
+    if "violin" in texto or "cello" in texto or "viola" in texto or "string" in texto:
+        return "strings"
+    if "organ" in texto or "harm" in texto:
+        return "organ"
+    if "piano" in texto or "keyb" in texto or nombre == "master":
         return "piano"
     if nombre == "other" or "pad" in texto or "bell" in texto or "synth" in texto:
         return "other"
@@ -644,12 +736,14 @@ def sintetizar_audio_directo(
         if isinstance(datos, dict):
             secuencia = datos.get("secuencia", [])
             instrumento = datos.get("instrumento")
+            modo_explicito = datos.get("modo_sintesis")
         else:
             secuencia = datos
             instrumento = None
+            modo_explicito = None
 
-        perfil = _perfil_instrumento(instrumento)
-        modo_sintesis = _modo_sintesis_pista(nombre_pista, instrumento)
+        perfil = _perfil_instrumento(nombre_pista, instrumento, modo_explicito or "")
+        modo_sintesis = modo_explicito or _modo_sintesis_pista(nombre_pista, instrumento)
         audio_pista = []
 
         for evento in secuencia:
@@ -783,6 +877,7 @@ if __name__ == "__main__":
                     "secuencia": nueva_sec,
                     "escala_base": modelo["escala_base"],
                     "bpm": datos.get("bpm"),
+                    "modo_sintesis": datos.get("modo_sintesis"),
                 }
 
             sintetizar_audio_directo(nueva_memoria, f"Fase_{f:02d}_Audio.wav")

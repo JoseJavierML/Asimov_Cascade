@@ -121,7 +121,30 @@ def _log_resumen_eventos_stems(pistas_memoria: dict):
         )
 
 
-def _extraer_superestado_desde_audio(ruta_audio: str, nombre_stem: str):
+def _tempo_del_mix(ruta_audio: str) -> float:
+    """Tempo global medido una sola vez sobre la mezcla completa.
+
+    Antes cada stem pasaba por beat_track por su cuenta. En una pieza real eso
+    devuelve valores distintos para el piano, el bajo y la bateria, de modo que
+    las pistas ya entran desincronizadas en la Fase 1 y el 'desincronizar los
+    cerebros' que describe el README ocurre por error, no por temperatura.
+    """
+    import librosa
+
+    try:
+        y, sr = librosa.load(ruta_audio, sr=22050, duration=None)
+        if y.size == 0:
+            return 120.0
+        tempo, _ = librosa.beat.beat_track(y=y, sr=sr, hop_length=512)
+        tempo = float(np.asarray(tempo).reshape(-1)[0])
+        if np.isfinite(tempo) and tempo > 0:
+            return round(tempo, 3)
+    except Exception:
+        pass
+    return 120.0
+
+
+def _extraer_superestado_desde_audio(ruta_audio: str, nombre_stem: str, bpm_global: float = None):
     import librosa
     from scipy.signal import find_peaks
 
@@ -143,10 +166,14 @@ def _extraer_superestado_desde_audio(ruta_audio: str, nombre_stem: str):
     if frames_recortados > 0:
         segundos_recortados = frames_recortados / sr
         print(f"  [Audio] {nombre_stem}: recorte inicial de silencio {segundos_recortados:.3f}s")
-    tempo_estimado, _ = librosa.beat.beat_track(y=y, sr=sr, hop_length=HOP)
-    tempo_estimado = float(np.asarray(tempo_estimado).reshape(-1)[0])
-    if not np.isfinite(tempo_estimado) or tempo_estimado <= 0:
-        tempo_estimado = 120.0
+
+    if bpm_global and bpm_global > 0:
+        tempo_estimado = float(bpm_global)
+    else:
+        tempo_estimado, _ = librosa.beat.beat_track(y=y, sr=sr, hop_length=HOP)
+        tempo_estimado = float(np.asarray(tempo_estimado).reshape(-1)[0])
+        if not np.isfinite(tempo_estimado) or tempo_estimado <= 0:
+            tempo_estimado = 120.0
 
     y_harmonic, _ = librosa.effects.hpss(y)
 
@@ -375,19 +402,22 @@ def extraer_adn_desde_audio(ruta_audio: str) -> dict:
             return resultado_master
 
         pistas_memoria: dict = {}
+        bpm_global = _tempo_del_mix(ruta_audio)
+        print(f"  [Audio] Tempo global de la mezcla: {bpm_global:.2f} BPM")
+
         for nombre_stem in ("piano", "guitar", "other", "bass", "drums"):
             ruta_stem = stems.get(nombre_stem)
             if not ruta_stem:
                 continue
 
-            secuencia, bpm_stem = _extraer_superestado_desde_audio(ruta_stem, nombre_stem)
+            secuencia, _bpm_stem = _extraer_superestado_desde_audio(ruta_stem, nombre_stem, bpm_global)
             if not secuencia:
                 continue
 
             pistas_memoria[nombre_stem] = {
                 "instrumento": _instrumento_desde_stem(nombre_stem),
                 "secuencia": secuencia,
-                "bpm": bpm_stem,
+                "bpm": bpm_global,
             }
 
         if not pistas_memoria:
@@ -433,6 +463,51 @@ def _velocidad_midi(elemento) -> float:
     if not (0.0 <= midi <= 127.0):
         return 1.0
     return round(float(min(1.0, max(0.05, midi / 127.0))), 4)
+
+
+_PALABRAS_MODO = (
+    ("drum", "drums"), ("perc", "drums"), ("kit", "drums"),
+    ("bass", "bass"), ("sub", "bass"),
+    ("guitar", "guitar"), ("pluck", "guitar"),
+    ("violin", "strings"), ("cello", "strings"), ("string", "strings"),
+    ("organ", "organ"), ("harm", "organ"),
+    ("pad", "other"), ("bell", "other"), ("synth", "other"),
+)
+
+
+def _modo_de_pista(nombre: str, secuencia: list) -> str:
+    """Modo de sintesis de una pista MIDI: manda el nombre, si no, el registro.
+
+    Al releer un MIDI, music21 deja instrument.instrumentName a None y el nombre
+    sobrevive solo en part.partName. Leer unicamente el segundo renombraba TODAS
+    las pistas a 'Piano', y el sintetizador de bajo no se activaba nunca.
+    """
+    texto = (nombre or "").strip().lower()
+    for palabra, modo in _PALABRAS_MODO:
+        if palabra in texto:
+            return modo
+    return _modo_por_registro(secuencia)
+
+
+def _modo_por_registro(secuencia: list, umbral_bajo: float = 53.0) -> str:
+    """Infiere el papel de la pista por su registro medio.
+
+    Muchos MIDI reales llegan sin nombre de instrumento util, y entonces no hay
+    forma de distinguir un bajo de un piano por otravia que el registro que
+    ocupa. Un Do2 medio solo puede ser un bajo.
+    """
+    from motor_generativo import _a_midi
+
+    midis = [midi for nota, _dur, _vel in secuencia for midi in _a_midi(nota)]
+    if not midis:
+        return "piano"
+
+    mediana = float(np.median(midis))
+    if mediana < umbral_bajo:
+        return "bass"
+    if mediana > 72:
+        return "other"
+    return "piano"
 
 
 def _mapa_tempo_musical(partitura) -> list:
@@ -544,12 +619,24 @@ def extraer_adn_desde_midi(archivo_midi: str) -> dict:
             prev_offset = offset_actual + duracion_q
 
         if secuencia:
-            nombre_inst = instrumento.instrumentName or "Piano"
+            # Al releer un MIDI, music21 conserva el nombre en part.partName pero
+            # deja instrument.instrumentName a None, asi que leer solo el segundo
+            # renombraba TODAS las pistas a "Piano".
+            nombre_bruto = (getattr(part, "partName", None) or "").strip()
+            if not nombre_bruto:
+                nombre_bruto = (getattr(instrumento, "instrumentName", None) or "").strip()
+
+            modo = _modo_de_pista(nombre_bruto, secuencia)
+            nombre_inst = nombre_bruto.title() if nombre_bruto else {
+                "bass": "Bajo", "other": "Pad", "piano": "Piano"
+            }.get(modo, "Piano")
+
             pistas_memoria[f"Pista_{i}_{nombre_inst}"] = {
                 "instrumento": instrumento,
                 "secuencia": secuencia,
                 "bpm": bpm_principal,
                 "segundos_por_cuadrada": segundos_por_cuadrada,
+                "modo_sintesis": modo,
             }
             total_seg = sum(float(d) for _n, d, _v in secuencia)
             print(f"  [MIDI] Pista {i} ({nombre_inst}): {len(secuencia)} eventos "
