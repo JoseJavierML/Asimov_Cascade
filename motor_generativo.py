@@ -1,34 +1,104 @@
 import random
 import os
+import sys
 import warnings
 import numpy as np
 
 warnings.filterwarnings("ignore")
 
 
+def _forzar_utf8_consola() -> None:
+    """Evita UnicodeEncodeError en consolas Windows (cp1252 por defecto)."""
+    for flujo in (sys.stdout, sys.stderr):
+        try:
+            flujo.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+_forzar_utf8_consola()
+
+
+def _midi_desde_token(token: str):
+    """Resuelve un token suelto a MIDI: '60', 'C4', 'Bb3' o '60.5'. None si no aplica."""
+    import librosa
+
+    texto = token.strip()
+    if not texto:
+        return None
+
+    if texto.isdigit() or (texto.startswith("-") and texto[1:].isdigit()):
+        return int(texto)
+
+    for candidato in (texto, texto.replace("-", "b")):
+        try:
+            return int(round(float(librosa.note_to_midi(candidato))))
+        except Exception:
+            continue
+    return None
+
+
+def _a_midi(nota) -> tuple:
+    """Normaliza CUALQUIER representacion de nota a tupla de enteros MIDI.
+
+    Acepta y unifica todas las formas que circulan por el motor:
+        "REST" / "" / None   -> ()
+        "Acorde_60.64.67"    -> (60, 64, 67)
+        ("60", "64", "67")   -> (60, 64, 67)
+        "C4" / "Bb3"         -> (60,)
+        ("C4", "E4")         -> (60, 64)
+        60 / 60.0            -> (60,)
+
+    Motivo (fix v4.0): existian dos codificaciones incompatibles para el mismo
+    acorde. "Acorde_60.64.67" funcionaba, pero la normalizacion de Markov la
+    reconvertia a ('60','64','67'), y el sintetizador intentaba resolver cada
+    elemento con librosa.note_to_hz('60'), que falla porque '60' no es un
+    nombre de nota. Todos los acordes MIDI se descartaban en silencio (57 de 65
+    eventos en la regresion) y la escala tonal quedaba vacia, perdiendo el ancla
+    armonica del Softmax.
+    """
+    if nota is None or isinstance(nota, (bool, np.bool_)):
+        return ()
+
+    if isinstance(nota, (int, float, np.integer, np.floating)):
+        valor = int(round(float(nota)))
+        return (valor,) if 0 <= valor <= 127 else ()
+
+    if isinstance(nota, (tuple, list, set)):
+        unicos: list = []
+        for elemento in nota:
+            for midi in _a_midi(elemento):
+                if midi not in unicos:
+                    unicos.append(midi)
+        return tuple(unicos)
+
+    if not isinstance(nota, str):
+        return ()
+
+    texto = nota.strip()
+    if not texto or texto.upper() in ("REST", "SILENCIO", "NONE"):
+        return ()
+
+    if texto.upper().startswith("ACORDE_"):
+        cuerpo = texto.split("_", 1)[1].replace(",", ".")
+        candidatos = cuerpo.split(".")
+    else:
+        candidatos = [texto]
+
+    unicos = []
+    for candidato in candidatos:
+        midi = _midi_desde_token(candidato)
+        if midi is not None and 0 <= midi <= 127 and midi not in unicos:
+            unicos.append(midi)
+    return tuple(unicos)
+
+
 def construir_cadena_markov(secuencia: list, orden: int = 2) -> dict:
     def _normalizar_nota(nota):
-        if nota in ("REST", ""):
+        if isinstance(nota, str) and nota.strip().upper() in ("REST", "SILENCIO"):
             return "REST"
-        if isinstance(nota, (tuple, list)):
-            notas_normalizadas = []
-            for elemento in nota:
-                nota_normalizada = _normalizar_nota(elemento)
-                if nota_normalizada == "REST":
-                    continue
-                if isinstance(nota_normalizada, tuple):
-                    notas_normalizadas.extend(nota_normalizada)
-                else:
-                    notas_normalizadas.append(str(nota_normalizada))
-            if not notas_normalizadas:
-                return "REST"
-            return tuple(dict.fromkeys(notas_normalizadas))
-        if isinstance(nota, str) and nota.startswith("Acorde_"):
-            partes = [parte for parte in nota.split("_", 1)[1].split(".") if parte]
-            if not partes:
-                return "REST"
-            return tuple(partes)
-        return (str(nota),)
+        midis = _a_midi(nota)
+        return midis if midis else "REST"
 
     def _bin_velocidad(velocidad: float, es_descanso: bool = False) -> float:
         if es_descanso:
@@ -67,34 +137,9 @@ def construir_cadena_markov(secuencia: list, orden: int = 2) -> dict:
     }
 
 
-def _notas_desde_evento(nota_str) -> list[int]:
-    import librosa
-
-    if nota_str in ("REST", ""):
-        return []
-
-    if isinstance(nota_str, (tuple, list)):
-        notas_midi = []
-        for elemento in nota_str:
-            notas_midi.extend(_notas_desde_evento(elemento))
-        return notas_midi
-
-    if isinstance(nota_str, str) and nota_str.startswith("Acorde_"):
-        partes = nota_str.split("_", 1)[1].split(".")
-        notas_midi = []
-        for parte in partes:
-            if not parte.isdigit():
-                continue
-            try:
-                notas_midi.append(int(parte))
-            except Exception:
-                continue
-        return notas_midi
-
-    try:
-        return [int(round(float(librosa.note_to_midi(str(nota_str)))))]
-    except Exception:
-        return []
+def _notas_desde_evento(nota_str) -> list:
+    """MIDI ints de cualquier representacion de nota. Delegado en el parser canonico."""
+    return list(_a_midi(nota_str))
 
 
 def _escala_desde_secuencia(secuencia: list) -> set[int]:
@@ -557,30 +602,30 @@ def _sintetizar_drums(duracion: float, sr: int, amplitud: float, velocidad: floa
 
 
 def _nota_a_freq(nota_str):
+    """Frecuencia (Hz) de una nota o de un acorde.
+
+    Devuelve None para silencios o notas irrecuperables, un float para
+    monofonia y una lista de floats para acordes. Un acorde MIDI ahora suena
+    como acorde (antes la rama polifonica era inalcanzable).
+    """
     import librosa
 
-    if nota_str in ("REST", ""):
+    midis = _a_midi(nota_str)
+    if not midis:
         return None
-    try:
-        if isinstance(nota_str, (tuple, list)):
-            freqs = []
-            for elemento in nota_str:
-                freq_elemento = _nota_a_freq(elemento)
-                if isinstance(freq_elemento, list):
-                    freqs.extend(freq_elemento)
-                elif freq_elemento is not None:
-                    freqs.append(freq_elemento)
-            return freqs or None
-        if isinstance(nota_str, str) and nota_str.startswith("Acorde_"):
-            nums = [int(x) for x in nota_str.split("_")[1].split(".") if x.isdigit()]
-            if not nums:
-                return None
-            freq = float(librosa.midi_to_hz(min(nums)))
-        else:
-            freq = float(librosa.note_to_hz(str(nota_str)))
-        return freq if 20 < freq < 20000 else None
-    except Exception:
+
+    frecuencias = []
+    for midi in midis:
+        try:
+            freq = float(librosa.midi_to_hz(midi))
+        except Exception:
+            continue
+        if 20.0 < freq < 20000.0:
+            frecuencias.append(freq)
+
+    if not frecuencias:
         return None
+    return frecuencias[0] if len(frecuencias) == 1 else frecuencias
 
 
 def sintetizar_audio_directo(
@@ -616,10 +661,6 @@ def sintetizar_audio_directo(
             duracion = max(0.05, float(evento[1]))
             velocidad = float(evento[2]) if len(evento) >= 3 else 1.0
             velocidad = float(np.clip(velocidad, 0.0, 1.0))
-
-            if not isinstance(nota_str, (str, tuple, list)):
-                errores_nota += 1
-                continue
 
             if nota_str == "REST":
                 audio_pista.append(np.zeros(int(sr * duracion), dtype=np.float32))
@@ -683,7 +724,7 @@ def sintetizar_audio_directo(
             pistas_audio.append(np.concatenate(audio_pista))
 
     if errores_nota > 0:
-        print(f"  [Síntesis] {errores_nota} eventos ignorados (formato inválido o fuera de rango)")
+        print(f"  [Sintesis] {errores_nota} eventos ignorados (formato invalido o fuera de rango)")
 
     if not pistas_audio:
         raise RuntimeError(
@@ -708,7 +749,7 @@ def sintetizar_audio_directo(
     mezcla = np.clip(mezcla, -0.98, 0.98).astype(np.float32)
 
     sf.write(nombre_salida, mezcla, sr, subtype="PCM_16")
-    print(f"  [Síntesis] ✓ {nombre_salida}  ({len(mezcla)/sr:.1f}s, {notas_ok} notas)")
+    print(f"  [Sintesis] OK  {nombre_salida}  ({len(mezcla)/sr:.1f}s, {notas_ok} notas)")
     return True
 
 
