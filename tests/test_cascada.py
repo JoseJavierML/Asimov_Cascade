@@ -255,6 +255,74 @@ def test_sintesis_respeta_el_tempo_real():
         assert abs(len(audio) / sr - esperado) < 0.1, f"audio {len(audio)/sr:.2f}s vs esperado {esperado:.2f}s"
 
 
+# --------------------------------------------------------------------------
+# Bloque P1: fidelidad de la Fase 1. Antes arrancaba en un punto aleatorio y
+# solo sobrevivia el 12.5% de la obra, igual en la fase 1 que en la 10.
+# --------------------------------------------------------------------------
+
+@test
+def test_peso_memoria_decae_con_la_temperatura():
+    from motor_generativo import UMBRAL_LUCIDEZ, _peso_memoria
+
+    assert _peso_memoria(0.0) == 1.0
+    assert _peso_memoria(UMBRAL_LUCIDEZ) == 0.0
+    assert _peso_memoria(9.99) == 0.0
+    medio = _peso_memoria(UMBRAL_LUCIDEZ / 2)
+    assert 0.5 < medio < 1.0, medio
+    assert _peso_memoria(0.10) > _peso_memoria(0.25)
+
+
+@test
+def test_fase_lucida_reproduce_la_obra():
+    """Con memoria casi integra, la Fase 1 debe devolver la obra tal cual."""
+    from motor_generativo import construir_cadena_markov, generar_nueva_obra
+
+    original = [((60,), 0.5, 0.6), ((62,), 0.5, 0.8), ((64,), 0.5, 0.8), ((65,), 0.5, 0.6),
+                ((67,), 0.5, 0.8), ((64,), 0.5, 0.8), ((62,), 0.5, 0.6), ((60,), 0.5, 0.8)] * 6
+    modelo = construir_cadena_markov(original, orden=2)
+    fase1 = generar_nueva_obra(modelo, len(original), 0.10, orden=2)
+
+    assert len(fase1) == len(original), (len(fase1), len(original))
+    assert fase1[:len(fase1)] == original[:len(original)][:len(fase1)]
+
+
+@test
+def test_la_fase_lucida_aun_recuerda_la_obra():
+    """El olvido debe ser gradual: la primera fase conserva la mayor parte."""
+    import random as _random
+    import numpy as _np
+    from motor_generativo import _temperatura_por_fase
+
+    original = [((55 + (i * 2) % 24,), 0.25, 0.6) for i in range(60)]
+    _random.seed(11)
+    _np.random.seed(11)
+
+    primera = generar_nueva_obra(
+        construir_cadena_markov(original, orden=2),
+        len(original),
+        _temperatura_por_fase(1, 10, 1.80),
+        orden=2,
+    )
+    a, b = [e[0] for e in original], [e[0] for e in primera]
+    n = min(len(a), len(b))
+    coincidencia = sum(1 for i in range(n) if a[i] == b[i]) / max(len(a), len(b))
+    assert coincidencia >= 0.5, f"la fase lucida deberia recordar la obra, solo {coincidencia:.0%}"
+
+
+@test
+def test_alta_temperatura_es_markov_puro():
+    """Pasado el umbral, la memoria se apaga y no queda ancla posicional."""
+    from motor_generativo import UMBRAL_LUCIDEZ
+
+    original = [((60,), 0.5, 0.6), ((62,), 0.5, 0.8), ((64,), 0.5, 0.8)] * 20
+    modelo = construir_cadena_markov(original, orden=2)
+    resultados = set()
+    for _ in range(5):
+        sec = generar_nueva_obra(modelo, len(original), UMBRAL_LUCIDEZ + 0.5, orden=2)
+        resultados.add(tuple(e[0] for e in sec))
+    assert len(resultados) > 1, "a alta temperatura cada pasada deberia diferir"
+
+
 @test
 def test_cascada_completa_no_revienta():
     import tempfile
