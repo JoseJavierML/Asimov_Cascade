@@ -405,6 +405,105 @@ def test_el_sintetizador_respeta_el_modo_explicito():
     assert _modo_sintesis_pista("master", None) == "piano"
 
 
+# --------------------------------------------------------------------------
+# Bloque P1: cascada continua. Antes cada fase era un WAV suelto y el oyente
+# tenia que saltar de uno a otro a mano.
+# --------------------------------------------------------------------------
+
+@test
+def test_fundido_reduce_la_duracion_total():
+    """Cada union solapa dos fases, asi que el total se acorta."""
+    from motor_generativo import _fundir_buffers
+
+    sr = 8000
+    buffers = [np.ones(sr * 2, dtype=np.float32) for _ in range(4)]
+    mezcla = _fundir_buffers(buffers, sr, crossfade_s=0.5)
+    esperado = 4 * 2.0 - 3 * 0.5
+    assert abs(len(mezcla) / sr - esperado) < 1e-6, (len(mezcla) / sr, esperado)
+
+
+@test
+def test_fundido_conserva_la_energia_en_el_centro():
+    """Con mezcla lineal el centro se hunde; la curva raiz lo evita."""
+    from motor_generativo import _fundir_buffers
+
+    sr = 8000
+    buffers = [np.ones(sr, dtype=np.float32) for _ in range(2)]
+    mezcla = _fundir_buffers(buffers, sr, crossfade_s=0.5)
+    centro = mezcla[sr // 2]
+    assert abs(float(centro) - 1.0) < 0.05, centro
+
+
+@test
+def test_fundido_con_cero_o_una_sola_fase():
+    from motor_generativo import _fundir_buffers
+
+    sr = 8000
+    uno = [np.ones(1000, dtype=np.float32)]
+    assert len(_fundir_buffers(uno, sr, 0.5)) == 1000
+    largo = _fundir_buffers(uno, sr, 0.5)
+    assert np.allclose(largo, uno[0])
+
+    sin_fundido = _fundir_buffers([np.ones(500, dtype=np.float32) for _ in range(3)], sr, 0.0)
+    assert len(sin_fundido) == 1500
+
+
+@test
+def test_cascada_completa_se_escribe():
+    import soundfile as sf
+    from motor_generativo import sintetizar_cascada
+
+    fases = []
+    base = {
+        "piano": {"instrumento": None,
+                  "secuencia": [((60,), 0.4, 0.8), ((64,), 0.4, 0.6), ((67,), 0.4, 0.7)] * 6},
+    }
+    for _ in range(5):
+        fases.append({k: {"instrumento": v["instrumento"], "secuencia": list(v["secuencia"])}
+                      for k, v in base.items()})
+
+    with tempfile.TemporaryDirectory() as tmp:
+        salida = os.path.join(tmp, "cascada.wav")
+        assert sintetizar_cascada(fases, salida, sr=8000, crossfade_s=0.4) is True
+
+        audio, sr = sf.read(salida)
+        assert len(audio) > 0
+        assert np.max(np.abs(audio)) <= 1.0
+        assert np.max(np.abs(audio)) > 0.05
+
+        # 5 fases de 18 eventos x 0.4s = 7.2s cada una, menos 4 solapes de 0.4s
+        esperado = 5 * 7.2 - 4 * 0.4
+        assert abs(len(audio) / sr - esperado) < 0.2, (len(audio) / sr, esperado)
+
+
+@test
+def test_cascada_sin_fases_devuelve_false():
+    from motor_generativo import sintetizar_cascada
+
+    with tempfile.TemporaryDirectory() as tmp:
+        salida = os.path.join(tmp, "vacia.wav")
+        assert sintetizar_cascada([], salida) is False
+        assert sintetizar_cascada([{}, {}], salida) is False
+
+
+@test
+def test_sintetizar_audio_directo_no_rompio_la_interfaz():
+    """El refactor de _renderizar_pistas no debe cambiar el contrato publico."""
+    import soundfile as sf
+    from motor_generativo import sintetizar_audio_directo
+
+    with tempfile.TemporaryDirectory() as tmp:
+        salida = os.path.join(tmp, "directo.wav")
+        ok = sintetizar_audio_directo(
+            {"piano": {"instrumento": None,
+                       "secuencia": [((60,), 0.5, 1.0), ((64,), 0.5, 0.5)]}},
+            salida,
+        )
+        assert ok is True
+        audio, _ = sf.read(salida)
+        assert len(audio) > 0
+
+
 @test
 def test_cascada_completa_no_revienta():
     import tempfile

@@ -720,14 +720,16 @@ def _nota_a_freq(nota_str):
     return frecuencias[0] if len(frecuencias) == 1 else frecuencias
 
 
-def sintetizar_audio_directo(
+def _renderizar_pistas(
     diccionario_pistas: dict,
-    nombre_salida: str,
     sr: int = 44100,
     amplitud_pista: float = 0.35,
-) -> bool:
-    import soundfile as sf
+) -> np.ndarray:
+    """Renderiza el diccionario de pistas a un unico buffer mono.
 
+    Extraido de sintetizar_audio_directo para poder reutilizarlo sin escribir
+    a disco: la cascada continua necesita los audios en memoria para fundirlos.
+    """
     pistas_audio = []
     errores_nota = 0
     notas_ok = 0
@@ -840,10 +842,99 @@ def sintetizar_audio_directo(
     if pico > 0:
         mezcla = (mezcla / pico) * 0.92
 
-    mezcla = np.clip(mezcla, -0.98, 0.98).astype(np.float32)
+    return np.clip(mezcla, -0.98, 0.98).astype(np.float32), notas_ok
+
+
+def sintetizar_audio_directo(
+    diccionario_pistas: dict,
+    nombre_salida: str,
+    sr: int = 44100,
+    amplitud_pista: float = 0.35,
+) -> bool:
+    import soundfile as sf
+
+    mezcla, notas_ok = _renderizar_pistas(diccionario_pistas, sr, amplitud_pista)
 
     sf.write(nombre_salida, mezcla, sr, subtype="PCM_16")
     print(f"  [Sintesis] OK  {nombre_salida}  ({len(mezcla)/sr:.1f}s, {notas_ok} notas)")
+    return True
+
+
+def _fundir_buffers(buffers: list, sr: int, crossfade_s: float) -> np.ndarray:
+    """Encadena buffers solapandolos con un fundido de igual energia.
+
+    Cada fase es una version distinta de la misma obra, y elTitulo del proyecto
+    habla de 'cascada'. Con archivos sueltos el oyente tiene que saltar de uno a
+    otro a mano; aqui cada iteracion se derrama sobre la siguiente y se escucha
+    la obra deshacerse en una sola toma continua.
+
+    La curva es raiz cuadrada (ley de cosenos simplificada): con una mezcla
+    lineal el centro del cruce se hunde, porque dos senos desfasados suman
+    energia pero no amplitud.
+    """
+    buffers = [np.asarray(b, dtype=np.float32) for b in buffers if len(b) > 0]
+    if not buffers:
+        return np.zeros(0, dtype=np.float32)
+    if len(buffers) == 1:
+        return buffers[0]
+
+    muestras = int(sr * max(0.0, float(crossfade_s)))
+    if muestras > 0:
+        muestras = min(muestras, min(len(b) for b in buffers))
+    if muestras <= 0:
+        return np.concatenate(buffers).astype(np.float32)
+
+    curva = np.sqrt(np.linspace(0.0, 1.0, muestras, dtype=np.float32))
+
+    resultado = buffers[0]
+    for siguiente in buffers[1:]:
+        cola = resultado[-muestras:]
+        cabeza = siguiente[:muestras]
+        cruce = (cola * (1.0 - curva) + cabeza * curva).astype(np.float32)
+        resultado = np.concatenate([resultado[:-muestras], cruce, siguiente[muestras:]])
+
+    return resultado.astype(np.float32)
+
+
+def sintetizar_cascada(
+    fases: list,
+    nombre_salida: str,
+    sr: int = 44100,
+    amplitud_pista: float = 0.35,
+    crossfade_s: float = 1.5,
+) -> bool:
+    """Funde todas las fases en un unico WAV continuo.
+
+    fases: lista de diccionarios de pistas, en orden de degradacion.
+    Devuelve False si no hay ninguna fase utilizable.
+    """
+    import soundfile as sf
+
+    fases_validas = [f for f in fases if f]
+    if not fases_validas:
+        print("  [Cascada] No hay fases validas para fundir.")
+        return False
+
+    buffers = []
+    for indice, fase in enumerate(fases_validas, start=1):
+        mezcla, _notas = _renderizar_pistas(fase, sr, amplitud_pista)
+        buffers.append(mezcla)
+
+    cascada = _fundir_buffers(buffers, sr, crossfade_s)
+    if cascada.size == 0:
+        print("  [Cascada] El fundido quedo vacio.")
+        return False
+
+    pico = float(np.max(np.abs(cascada)))
+    if pico > 0:
+        cascada = (cascada / pico) * 0.92
+    cascada = np.clip(cascada, -0.98, 0.98).astype(np.float32)
+
+    sf.write(nombre_salida, cascada, sr, subtype="PCM_16")
+    solapes = max(0, len(fases_validas) - 1)
+    print(f"  [Cascada] OK  {nombre_salida}  "
+          f"({len(cascada)/sr:.1f}s, {len(fases_validas)} fases fundidas, "
+          f"{crossfade_s:.2f}s de solape cada una, pico {pico:.2f})")
     return True
 
 
@@ -854,6 +945,8 @@ if __name__ == "__main__":
     orden_markov = 2
     num_fases = 15
     temperatura_maxima = 1.80
+    fundir_cascada = True
+    crossfade_s = 1.5
 
     if not os.path.exists(archivo_input):
         print(f"Error: no se encuentra '{archivo_input}'")
@@ -862,6 +955,8 @@ if __name__ == "__main__":
         for datos in memoria_actual.values():
             datos["escala_base"] = _escala_desde_secuencia(datos["secuencia"])
         print("\n=== INICIANDO CASCADA DE ASIMOV ===\n")
+
+        fases: list = []
 
         for f in range(1, num_fases + 1):
             temperatura = _temperatura_por_fase(f, num_fases, temperatura_maxima)
@@ -881,6 +976,10 @@ if __name__ == "__main__":
                 }
 
             sintetizar_audio_directo(nueva_memoria, f"Fase_{f:02d}_Audio.wav")
+            fases.append(nueva_memoria)
             memoria_actual = nueva_memoria
+
+        if fundir_cascada:
+            sintetizar_cascada(fases, "Cascada_Continua.wav", crossfade_s=crossfade_s)
 
         print("\n=== PROCESO COMPLETADO ===")

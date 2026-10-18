@@ -8,6 +8,7 @@ from motor_generativo import (
     construir_cadena_markov,
     generar_nueva_obra,
     sintetizar_audio_directo,
+    sintetizar_cascada,
 )
 
 _TMPDIR = tempfile.mkdtemp(prefix="asimov_")
@@ -38,6 +39,14 @@ with col_der:
     orden_markov = st.select_slider("Orden Markov", [1, 2, 3, 4], value=2,
                                     help="Orden 1-2 para piezas cortas. 3-4 para piezas largas.")
     mostrar_onda = st.checkbox("Mostrar forma de onda", value=False)
+    fundir_cascada = st.checkbox(
+        "Generar cascada continua (un solo archivo)",
+        value=False,
+        help="Funde cada fase con la siguiente mediante un crossfade de igual energia, "
+             "para escuchar el colapso completo en una sola toma continua.",
+    )
+    if fundir_cascada:
+        crossfade_s = st.slider("Duración del crossfade (s)", 0.25, 5.0, 1.5, 0.25)
 
 st.divider()
 
@@ -88,6 +97,8 @@ st.markdown("### 🎼 Historial de Degradación")
 progress_bar = st.progress(0)
 status_text  = st.empty()
 
+fases_para_cascada: list = []
+
 for f in range(1, num_fases + 1):
     temperatura = _temperatura_por_fase(f, num_fases, temperatura_max)
     status_text.text(f"Generando Fase {f}/{num_fases}  (Temperatura: {temperatura:.2f})…")
@@ -131,7 +142,27 @@ for f in range(1, num_fases + 1):
         st.caption(f"Notas únicas: **{notas_unicas}** · Eventos: **{sum(len(v['secuencia']) for v in nueva_memoria.values())}**")
 
     memoria_actual = nueva_memoria
+    fases_para_cascada.append(nueva_memoria)
     progress_bar.progress(f / num_fases)
 
 status_text.text("✅ Colapso completado.")
 st.balloons()
+
+if fundir_cascada:
+    with st.spinner("Fundiendo las fases en una toma continua…"):
+        ruta_cascada = os.path.join(_TMPDIR, "Cascada_Continua.wav")
+        try:
+            if sintetizar_cascada(
+                fases_para_cascada,
+                ruta_cascada,
+                crossfade_s=crossfade_s,
+            ):
+                st.markdown("### 🌊 Cascada Continua")
+                with open(ruta_cascada, "rb") as wf:
+                    st.audio(wf.read(), format="audio/wav")
+                st.caption(
+                    f"{len(fases_para_cascada)} fases encadenadas con "
+                    f"{crossfade_s:.2f} s de crossfade en cada unión."
+                )
+        except Exception as e:
+            st.error(f"❌ No se pudo generar la cascada continua: {e}")

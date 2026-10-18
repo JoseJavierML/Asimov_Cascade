@@ -45,6 +45,20 @@ Dashboard interactivo con los siguientes controles:
 | Temperatura final | 0.5–3.0 | Límite máximo de caos en la iteración final |
 | Orden de Markov | 1–4 | Contexto de memoria a corto plazo del modelo |
 | Forma de onda | on/off | Visualización del espectro de audio masterizado por fase |
+| Cascada continua | on/off | Funde las fases en un único WAV con crossfade |
+| Duración del crossfade | 0.25–5.0 s | Solape entre fase y fase en la cascada continua |
+
+### Cascada Continua
+
+Por defecto cada fase se exporta como un WAV independiente y hay que escucharlos en orden. Con la casilla activada el motor genera además **un único archivo donde cada iteración se derrama sobre la siguiente**: se escucha la obra deshacerse de principio a fin, sin cortes.
+
+El fundido usa una curva de **igual energía** (`sqrt` en lugar de lineal). Con una mezcla lineal el centro de cada cruce se hunde, porque dos ondas desfasadas suman energía pero no amplitud; la curva en raíz lo compensa y mantiene el volumen plano a lo largo de toda la cascada.
+
+Desde el CLI se genera siempre:
+
+```python
+python motor_generativo.py   # escribe Fase_01..N y Cascada_Continua.wav
+```
 
 ---
 
