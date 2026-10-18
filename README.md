@@ -20,6 +20,8 @@ Procesa el audio de entrada y construye la memoria base estandarizada.
 - **Separación de Fuentes (Stem Separation):** Utiliza el modelo `htdemucs_6s` de Meta para aislar quirúrgicamente 6 pistas (Voces, Batería, Bajo, Piano, Guitarra y Otros). Las pistas retenidas se procesan de forma independiente.
 - **Oído Biónico y DSP:** Aplica recorte automático de silencios y ajustes de alta sensibilidad (umbral -55dB, delta 0.03) para no perder dinámicas tenues (como cajas de música o subgraves). Combina Separación Armónica/Percusiva (HPSS) y la Transformada de Q Constante (CQT).
 - **Super-Estados de Memoria:** El sistema ya no extrae notas aisladas, sino eventos tridimensionales exactos. Cada estado codificado contiene: `(Tupla_de_Acorde, Duración_Cuantizada, Velocidad_RMS)`. El reloj metronómico soporta tresillos y puntillos, y las dinámicas se agrupan en 5 niveles para preservar el "groove" y la intención física.
+- **Reloj Temporal Unificado:** Todas las duraciones viajan en **segundos**, nunca en negras. En MIDI se extrae el mapa de tempo (`MetronomeMark`) y se convierte con integración por tramos, de modo que un *accelerando* no se estire. La ruta de audio devuelve el tempo detectado por `librosa.beat`. Ambos caminos exponen la clave `bpm`, que viaja intacto a través de todas las fases.
+- **Dinámica Real:** La velocidad se toma del `velocity` del MIDI (0-127 normalizado) y del RMS del audio. Es el tercer campo del Super-Estado, y es lo que impide que todas las notas suenen con el mismo golpe.
 
 ### `motor_generativo.py` — Clúster Estocástico y Síntesis Multitímbrica
 El núcleo cognitivo del sistema, rediseñado para soportar caos concurrente.
@@ -43,6 +45,34 @@ Dashboard interactivo con los siguientes controles:
 | Temperatura final | 0.5–3.0 | Límite máximo de caos en la iteración final |
 | Orden de Markov | 1–4 | Contexto de memoria a corto plazo del modelo |
 | Forma de onda | on/off | Visualización del espectro de audio masterizado por fase |
+
+---
+
+## Representación Canónica de Notas
+
+Todo lo que circula por el motor se reduce a una única forma: **tupla de enteros MIDI**.
+
+| Entrada | Salida de `_a_midi()` |
+|---|---|
+| `"REST"`, `""`, `None` | `()` |
+| `"Acorde_60.64.67"` | `(60, 64, 67)` |
+| `("60", "64", "67")` | `(60, 64, 67)` |
+| `"C4"` / `"Bb3"` | `(60,)` |
+| `60` / `60.0` | `(60,)` |
+
+La normalización de Markov, la escala tonal y el sintetizador consumen todos esta misma función. Esto evita que una misma nota se degrade por el camino: un acorde MIDI que atraviesa la cadena conserva su armonía y su afinidad tonal en las diez fases.
+
+---
+
+## Tests
+
+La batería de regresión no necesita `pytest` ni dependencias adicionales:
+
+```bash
+python tests/test_cascada.py
+```
+
+Cada test fija un fallo concreto que ya ocurrió, para que no vuelva.
 
 ---
 
