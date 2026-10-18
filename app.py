@@ -102,6 +102,7 @@ for f in range(1, num_fases + 1):
             "secuencia": nueva_sec,
             "escala_base": modelo["escala_base"],
             "bpm": datos.get("bpm"),
+            "modo_sintesis": datos.get("modo_sintesis"),
         }
 
     nombre_salida = os.path.join(_TMPDIR, f"Fase_{f:02d}_Audio.wav")

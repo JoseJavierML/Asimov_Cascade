@@ -324,6 +324,88 @@ def test_alta_temperatura_es_markov_puro():
 
 
 @test
+def test_el_bajo_midi_no_se_renombra_a_piano():
+    """instrumentName llega a None al releer un MIDI; el nombre vive en partName."""
+    import music21 as m21
+    from memoria_base import extraer_adn_musical
+    from motor_generativo import _modo_sintesis_pista
+
+    with tempfile.TemporaryDirectory() as tmp:
+        score = m21.stream.Score()
+        for instrumento, notas in (
+            (m21.instrument.ElectricBass(), ["C2", "D2", "E2", "F2"]),
+            (m21.instrument.Guitar(), ["E4", "F4", "G4", "A4"]),
+            (m21.instrument.Piano(), ["C5", "D5", "E5", "F5"]),
+        ):
+            parte = m21.stream.Part()
+            parte.append(instrumento)
+            for nombre in notas:
+                n = m21.note.Note(nombre)
+                n.quarterLength = 1.0
+                n.volume.velocity = 90
+                parte.append(n)
+            score.insert(0, parte)
+        score.insert(0, m21.tempo.MetronomeMark(number=120))
+        ruta = os.path.join(tmp, "mix.mid")
+        score.write("midi", fp=ruta)
+
+        memoria = extraer_adn_musical(ruta)
+        modos = {n: _modo_sintesis_pista(n, None) for n in memoria}
+
+        assert "bass" in modos.values(), modos
+        assert "guitar" in modos.values(), modos
+        assert "piano" in modos.values(), modos
+
+
+@test
+def test_el_registro_delata_al_bajo():
+    from memoria_base import _modo_por_registro
+
+    grave = [((36,), 1.0, 1.0), ((41,), 1.0, 1.0), ((43,), 1.0, 1.0)]
+    medio = [((60,), 1.0, 1.0), ((64,), 1.0, 1.0), ((67,), 1.0, 1.0)]
+    agudo = [((84,), 1.0, 1.0), ((88,), 1.0, 1.0)]
+    assert _modo_por_registro(grave) == "bass"
+    assert _modo_por_registro(medio) == "piano"
+    assert _modo_por_registro(agudo) == "other"
+    assert _modo_por_registro([]) == "piano"
+
+
+@test
+def test_todos_los_stems_comparten_el_tempo_global():
+    """Si cada stem mide su propio tempo, las pistas entran desfasadas."""
+    from memoria_base import _extraer_superestado_desde_audio, _tempo_del_mix
+
+    with tempfile.TemporaryDirectory() as tmp:
+        import numpy as _np
+        import soundfile as _sf
+        sr = 22050
+        t = _np.arange(int(sr * 4)) / sr
+        # Dos senos con pulsos a 100 BPM para que beat_track tenga algo que medir.
+        tono = (0.3 * _np.sin(2 * _np.pi * 220 * t) * (_np.sin(2 * _np.pi * (100 / 60) * t) > 0.4)).astype("float32")
+        ruta = os.path.join(tmp, "pulso.wav")
+        _sf.write(ruta, tono, sr)
+
+        global_ = _tempo_del_mix(ruta)
+        assert 80 <= global_ <= 130, global_
+
+        seq_a, bpm_a = _extraer_superestado_desde_audio(ruta, "a", global_)
+        seq_b, bpm_b = _extraer_superestado_desde_audio(ruta, "b", global_)
+        assert bpm_a == bpm_b == global_, (bpm_a, bpm_b, global_)
+        assert np.allclose([d for _n, d, _v in seq_a], [d for _n, d, _v in seq_b])
+
+
+@test
+def test_el_sintetizador_respeta_el_modo_explicito():
+    """Un modo forzado debe mandar sobre el nombre de la pista."""
+    from motor_generativo import _modo_sintesis_pista
+
+    assert _modo_sintesis_pista("Pista_0_Lo_Que_Sea", None) == "other"
+    # Con modo explicito, sintetizar_audio_directo ya no lo recalcula; aqui se
+    # comprueba que el nombre no induce a error por si mismo.
+    assert _modo_sintesis_pista("master", None) == "piano"
+
+
+@test
 def test_cascada_completa_no_revienta():
     import tempfile
     import soundfile as sf

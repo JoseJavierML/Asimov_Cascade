@@ -2,6 +2,9 @@ import random
 import os
 import sys
 import warnings
+from collections import Counter
+from functools import lru_cache
+
 import numpy as np
 
 warnings.filterwarnings("ignore")
@@ -19,8 +22,13 @@ def _forzar_utf8_consola() -> None:
 _forzar_utf8_consola()
 
 
+@lru_cache(maxsize=8192)
 def _midi_desde_token(token: str):
-    """Resuelve un token suelto a MIDI: '60', 'C4', 'Bb3' o '60.5'. None si no aplica."""
+    """Resuelve un token suelto a MIDI: '60', 'C4', 'Bb3' o '60.5'. None si no aplica.
+
+    Memorizado: _a_midi se llama por cada candidato y por cada paso del paseo,
+    y los mismos nombres de nota se repiten miles de veces en una obra larga.
+    """
     import librosa
 
     texto = token.strip()
@@ -220,9 +228,12 @@ def _elegir_estado_por_temperatura(
 
     logits = []
     transiciones_actuales = transiciones.get(clave_actual, [])
+    # Counter en vez de .count() por candidato: antes era O(n*m) en el bucle caliente.
+    frecuencias = Counter(transiciones_actuales) if transiciones_actuales else Counter()
+
     for estado in candidatos:
         nota = estado[0] if isinstance(estado, (list, tuple)) and len(estado) >= 1 else estado
-        conteo = transiciones_actuales.count(estado) if transiciones_actuales else 1
+        conteo = frecuencias.get(estado, 1) if frecuencias else 1
         afinidad = _afinidad_tonal(nota, escala_base)
 
         logit = np.log1p(conteo)
@@ -433,18 +444,26 @@ _PERFILES = {
 }
 
 
-def _perfil_instrumento(instrumento) -> dict:
-    nombre = ""
+def _perfil_instrumento(nombre_pista, instrumento, modo: str = "") -> dict:
+    """Perfil FM del sintetizador.
+
+    Antes solo miraba instrumento.instrumentName, que al releer un MIDI es None,
+    asi que los perfiles 'strings' y 'organ' eran inalcanzables: ningun modo
+    devuelto por _modo_sintesis_pista los pedia jamas.
+    """
     try:
-        nombre = (instrumento.instrumentName or "").lower()
+        nombre_instrumento = (instrumento.instrumentName or "").lower()
     except Exception:
-        pass
-    if "piano" in nombre or "keyb" in nombre:
-        return _PERFILES["piano"]
-    if "string" in nombre or "violin" in nombre or "cello" in nombre:
+        nombre_instrumento = ""
+
+    texto = f"{(nombre_pista or '')} {nombre_instrumento}".strip().lower()
+
+    if modo == "strings" or any(k in texto for k in ("string", "violin", "viola", "cello", "viol")):
         return _PERFILES["strings"]
-    if "organ" in nombre or "harm" in nombre:
+    if modo == "organ" or any(k in texto for k in ("organ", "harm", "accordion")):
         return _PERFILES["organ"]
+    if modo == "piano" or any(k in texto for k in ("piano", "keyb", "grand", "rhodes")):
+        return _PERFILES["piano"]
     return _PERFILES["default"]
 
 
@@ -463,7 +482,11 @@ def _modo_sintesis_pista(nombre_pista: str, instrumento) -> str:
         return "bass"
     if "guitar" in texto or "pluck" in texto:
         return "guitar"
-    if "piano" in texto or nombre == "master":
+    if "violin" in texto or "cello" in texto or "viola" in texto or "string" in texto:
+        return "strings"
+    if "organ" in texto or "harm" in texto:
+        return "organ"
+    if "piano" in texto or "keyb" in texto or nombre == "master":
         return "piano"
     if nombre == "other" or "pad" in texto or "bell" in texto or "synth" in texto:
         return "other"
@@ -713,12 +736,14 @@ def sintetizar_audio_directo(
         if isinstance(datos, dict):
             secuencia = datos.get("secuencia", [])
             instrumento = datos.get("instrumento")
+            modo_explicito = datos.get("modo_sintesis")
         else:
             secuencia = datos
             instrumento = None
+            modo_explicito = None
 
-        perfil = _perfil_instrumento(instrumento)
-        modo_sintesis = _modo_sintesis_pista(nombre_pista, instrumento)
+        perfil = _perfil_instrumento(nombre_pista, instrumento, modo_explicito or "")
+        modo_sintesis = modo_explicito or _modo_sintesis_pista(nombre_pista, instrumento)
         audio_pista = []
 
         for evento in secuencia:
@@ -852,6 +877,7 @@ if __name__ == "__main__":
                     "secuencia": nueva_sec,
                     "escala_base": modelo["escala_base"],
                     "bpm": datos.get("bpm"),
+                    "modo_sintesis": datos.get("modo_sintesis"),
                 }
 
             sintetizar_audio_directo(nueva_memoria, f"Fase_{f:02d}_Audio.wav")
