@@ -126,6 +126,27 @@ def _log_resumen_eventos_stems(pistas_memoria: dict):
         )
 
 
+UMBRAL_STEM_DB = 30.0
+"""Cuantos dB por debajo de la mezcla puede estar un stem y seguir usandose.
+
+Demucs reparte la energia entre sus seis salidas, y en una fuente monoinst
+ruimental (un piano solo) deja varias pistas en silencio practico. Como el
+detector de silencio era relativo a cada stem consigo mismo, una pista a -62 dB
+seguia produciendo cuatro notas por evento, y el motor las renderizaba a pleno
+volumen: cinco copias del mismo sonido sumadas, un muro de ruido.
+
+Se mide el RMS de cada stem contra el de la mezcla original y se descarta el que
+no aporte energia real.
+"""
+
+
+def _rms_db(senal: np.ndarray) -> float:
+    if senal.size == 0:
+        return -120.0
+    rms = float(np.sqrt(np.mean(np.asarray(senal, dtype=np.float64) ** 2)))
+    return 20.0 * float(np.log10(rms + 1e-12))
+
+
 def _tempo_del_mix(ruta_audio: str) -> float:
     """Tempo global medido una sola vez sobre la mezcla completa.
 
@@ -149,7 +170,8 @@ def _tempo_del_mix(ruta_audio: str) -> float:
     return 120.0
 
 
-def _extraer_superestado_desde_audio(ruta_audio: str, nombre_stem: str, bpm_global: float = None):
+def _extraer_superestado_desde_audio(ruta_audio: str, nombre_stem: str, bpm_global: float = None,
+                                    umbral_db: float = None):
     import librosa
     from scipy.signal import find_peaks
 
@@ -171,6 +193,13 @@ def _extraer_superestado_desde_audio(ruta_audio: str, nombre_stem: str, bpm_glob
     if frames_recortados > 0:
         segundos_recortados = frames_recortados / sr
         print(f"  [Audio] {nombre_stem}: recorte inicial de silencio {segundos_recortados:.3f}s")
+
+    if umbral_db is not None:
+        nivel = _rms_db(y)
+        if nivel < umbral_db:
+            print(f"  [Audio] {nombre_stem}: descartado ({nivel:.1f} dB, "
+                  f"por debajo del umbral de {umbral_db:.1f} dB)")
+            return [], 0.0
 
     if bpm_global and bpm_global > 0:
         tempo_estimado = float(bpm_global)
@@ -410,12 +439,21 @@ def extraer_adn_desde_audio(ruta_audio: str) -> dict:
         bpm_global = _tempo_del_mix(ruta_audio)
         print(f"  [Audio] Tempo global de la mezcla: {bpm_global:.2f} BPM")
 
+        import librosa
+        mezcla, _sr_mezcla = librosa.load(ruta_audio, sr=22050)
+        rms_mezcla = _rms_db(mezcla)
+        umbral = rms_mezcla - UMBRAL_STEM_DB
+        print(f"  [Audio] Referencia de energia: {rms_mezcla:.1f} dB "
+              f"(se descartan stems por debajo de {umbral:.1f} dB)")
+
         for nombre_stem in ("piano", "guitar", "other", "bass", "drums"):
             ruta_stem = stems.get(nombre_stem)
             if not ruta_stem:
                 continue
 
-            secuencia, _bpm_stem = _extraer_superestado_desde_audio(ruta_stem, nombre_stem, bpm_global)
+            secuencia, _bpm_stem = _extraer_superestado_desde_audio(
+                ruta_stem, nombre_stem, bpm_global, umbral_db=umbral
+            )
             if not secuencia:
                 continue
 
@@ -424,6 +462,14 @@ def extraer_adn_desde_audio(ruta_audio: str) -> dict:
                 "secuencia": secuencia,
                 "bpm": bpm_global,
             }
+
+        if pistas_memoria:
+            descartados = [s for s in ("piano", "guitar", "other", "bass", "drums")
+                           if s in stems and s not in pistas_memoria]
+            if descartados:
+                print(f"  [Audio] Stems descartados por no aportar energia: "
+                      f"{', '.join(descartados)}")
+            print(f"  [Audio] Pistas que entran al motor: {', '.join(pistas_memoria)}")
 
         if not pistas_memoria:
             print("  [Audio] AVISO: ningún stem produjo eventos útiles. Se usará el audio original como master.")
