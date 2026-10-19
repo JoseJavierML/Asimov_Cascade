@@ -94,12 +94,17 @@ body {
     display: block;
 }
 
-/* Streamlit envuelve el markdown en un contenedor con su propio alineado */
+/* Streamlit envuelve el markdown en un contenedor con su propio ancho y
+   alineado. Forzamos ancho completo y centrado para que margin:0 auto
+   funcione de verdad. */
 [data-testid="stMarkdownContainer"] {
+    width: 100% !important;
+    max-width: 100% !important;
     text-align: center !important;
 }
 [data-testid="stMarkdownContainer"] p,
-[data-testid="stMarkdownContainer"] h1 {
+[data-testid="stMarkdownContainer"] h1,
+[data-testid="stMarkdownContainer"] div {
     text-align: center !important;
 }
 .asimov-chip {
@@ -199,9 +204,16 @@ hr { border-color: rgba(255,255,255,0.07); }
 
 def aplicar_tema(estado: str = "Estable", version: str = "v4.0") -> None:
     """Inyecta el tema y el fondo animado. Debe llamarse una vez, al inicio."""
+    campo = _campo_estelar()
+    css = _CSS.replace("__CAMPO__", campo).replace("__TAMANOS__", _tamanos(campo.count("radial-gradient")))
+    st.markdown(css, unsafe_allow_html=True)
+
+
+def cabecera(titulo: str, subtitulo: str, version: str = "v4.0", estado: str = "Estable") -> None:
+    """Titulo principal con el degradado del proyecto. Todo en un unico bloque."""
     st.markdown(
         f"""
-        <div style="text-align:center">
+        <div style="text-align:center !important; width:100%; margin:0 auto;">
             <div class="asimov-chip">
                 <span class="asimov-punto"></span>
                 <span>Asimov Cascade</span>
@@ -210,21 +222,6 @@ def aplicar_tema(estado: str = "Estable", version: str = "v4.0") -> None:
                 <span class="asimov-sep">·</span>
                 <span>{estado}</span>
             </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    campo = _campo_estelar()
-    css = _CSS.replace("__CAMPO__", campo).replace("__TAMANOS__", _tamanos(campo.count("radial-gradient")))
-    st.markdown(css, unsafe_allow_html=True)
-
-
-def cabecera(titulo: str, subtitulo: str) -> None:
-    """Titulo principal con el degradado del proyecto."""
-    st.markdown(
-        f"""
-        <div style="text-align:center !important; width:100%; margin:0 auto;">
             <h1 class="asimov-titulo">{titulo}<br><span style="color:#6b7280;font-weight:300">de </span><span class="gradiente">Asimov</span></h1>
             <p class="asimov-subtitulo">{subtitulo}</p>
         </div>
