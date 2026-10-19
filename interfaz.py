@@ -93,8 +93,8 @@ body {
 .asimov-chip {
     display: inline-flex;
     align-items: center;
-    gap: 0.55rem;
-    padding: 0.35rem 1rem;
+    gap: 0.65rem;
+    padding: 0.35rem 1.1rem;
     border-radius: 9999px;
     background: rgba(99,102,241,0.10);
     border: 1px solid rgba(99,102,241,0.22);
@@ -105,6 +105,7 @@ body {
     text-transform: uppercase;
     margin-bottom: 1.6rem;
 }
+.asimov-chip .asimov-sep { opacity: 0.5; }
 .asimov-punto {
     width: 0.5rem; height: 0.5rem;
     border-radius: 50%;
@@ -191,7 +192,11 @@ def aplicar_tema(estado: str = "Estable", version: str = "v4.0") -> None:
         <div style="text-align:center">
             <div class="asimov-chip">
                 <span class="asimov-punto"></span>
-                Estado del sistema &nbsp;//&nbsp; {version} &nbsp;//&nbsp; {estado}
+                <span>Asimov Cascade</span>
+                <span class="asimov-sep">·</span>
+                <span>{version}</span>
+                <span class="asimov-sep">·</span>
+                <span>{estado}</span>
             </div>
         </div>
         """,
@@ -207,7 +212,7 @@ def cabecera(titulo: str, subtitulo: str) -> None:
     """Titulo principal con el degradado del proyecto."""
     st.markdown(
         f"""
-        <h1 class="asimov-titulo">{titulo}<br><span class="gradiente">Asimov</span></h1>
+        <h1 class="asimov-titulo">{titulo}<br><span style="color:#6b7280;font-weight:300">de </span><span class="gradiente">Asimov</span></h1>
         <p class="asimov-subtitulo">{subtitulo}</p>
         """,
         unsafe_allow_html=True,

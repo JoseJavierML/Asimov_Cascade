@@ -18,7 +18,7 @@ st.set_page_config(page_title="La Cascada de Asimov", page_icon="🎹", layout="
 
 interfaz.aplicar_tema()
 interfaz.cabecera(
-    "La Cascada <span style='color:#6b7280;font-weight:300'>de</span>",
+    "La Cascada",
     "Decaimiento algorítmico de la memoria musical. "
     "Sube tu composición y escucha cómo una IA la olvida, fase a fase.",
 )
@@ -32,18 +32,6 @@ with col_izq:
         "Sube tu composición",
         type=["mid", "midi", "wav", "mp3"],
         help="MIDI sigue siendo el formato más estable. WAV/MP3 se separan en stems cuando es posible y ahora admiten material multitrack.",
-    )
-
-    st.markdown(
-        "<div style='height:1rem'></div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        "**Sobre los formatos**\n\n"
-        "- **MIDI** — extracción exacta, sin separación. La más fiable.\n"
-        "- **WAV / MP3** — se separan en 6 stems con `htdemucs_6s`.\n"
-        "- **Duración recomendada**: 20–60 s para probar rápido.",
-        unsafe_allow_html=True,
     )
 
 with col_der:
