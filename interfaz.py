@@ -71,8 +71,9 @@ body {
     font-weight: 700;
     letter-spacing: -0.05em;
     line-height: 1.05;
-    text-align: center;
+    text-align: center !important;
     margin: 0.4rem 0 0.2rem 0;
+    width: 100%;
 }
 .asimov-titulo .gradiente {
     background: linear-gradient(to right, #818cf8, #a855f7);
@@ -83,12 +84,13 @@ body {
                                 ultima letra se pinta de dos tonos */
 }
 .asimov-subtitulo {
-    text-align: center;
+    text-align: center !important;
     color: #6b7280;
     font-weight: 300;
     max-width: 40rem;
     margin: 0 auto 2.2rem auto;
     line-height: 1.7;
+    width: 100%;
 }
 .asimov-chip {
     display: inline-flex;
@@ -212,8 +214,10 @@ def cabecera(titulo: str, subtitulo: str) -> None:
     """Titulo principal con el degradado del proyecto."""
     st.markdown(
         f"""
-        <h1 class="asimov-titulo">{titulo}<br><span style="color:#6b7280;font-weight:300">de </span><span class="gradiente">Asimov</span></h1>
-        <p class="asimov-subtitulo">{subtitulo}</p>
+        <div style="text-align:center; width:100%;">
+            <h1 class="asimov-titulo" style="text-align:center;">{titulo}<br><span style="color:#6b7280;font-weight:300">de </span><span class="gradiente">Asimov</span></h1>
+            <p class="asimov-subtitulo">{subtitulo}</p>
+        </div>
         """,
         unsafe_allow_html=True,
     )
