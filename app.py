@@ -34,6 +34,18 @@ with col_izq:
         help="MIDI sigue siendo el formato más estable. WAV/MP3 se separan en stems cuando es posible y ahora admiten material multitrack.",
     )
 
+    st.markdown(
+        "<div style='height:1rem'></div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "**Sobre los formatos**\n\n"
+        "- **MIDI** — extracción exacta, sin separación. La más fiable.\n"
+        "- **WAV / MP3** — se separan en 6 stems con `htdemucs_6s`.\n"
+        "- **Duración recomendada**: 20–60 s para probar rápido.",
+        unsafe_allow_html=True,
+    )
+
 with col_der:
     st.subheader("Parámetros")
     num_fases    = st.slider("Fases de degradación", 3, 20, 10)
@@ -152,6 +164,8 @@ for f in range(1, num_fases + 1):
     progress_bar.progress(f / num_fases)
 
 status_text.text("Colapso completado.")
+
+st.success("Procesamiento completado. Descarga los archivos desde los reproductores de arriba.")
 
 if fundir_cascada:
     with st.spinner("Fundiendo las fases en una toma continua…"):

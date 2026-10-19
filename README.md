@@ -142,6 +142,18 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+### Detener correctamente
+
+En Windows, al pulsar `Ctrl+C` en la consola donde corre Streamlit, puede aparecer varias veces el mensaje `Stopping...` y un `ConnectionResetError` (WinError 10054). Es un comportamiento conocido de Streamlit/uvicorn en Windows y **no afecta** a los archivos generados.
+
+Para evitarlo:
+
+1. **Cierra la pestaña del navegador** primero.
+2. Espera un par de segundos a que el servidor detecte la desconexión.
+3. Pulsa `Ctrl+C` una sola vez.
+
+Los archivos generados (WAV por fase y la cascada continua) quedan en el directorio temporal del sistema (`%TEMP%\asimov_*`) y se pueden abrir directamente desde el reproductor integrado de la interfaz.
+
 ---
 
 ## Licencia
