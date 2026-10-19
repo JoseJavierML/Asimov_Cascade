@@ -91,6 +91,16 @@ body {
     margin: 0 auto 2.2rem auto;
     line-height: 1.7;
     width: 100%;
+    display: block;
+}
+
+/* Streamlit envuelve el markdown en un contenedor con su propio alineado */
+[data-testid="stMarkdownContainer"] {
+    text-align: center !important;
+}
+[data-testid="stMarkdownContainer"] p,
+[data-testid="stMarkdownContainer"] h1 {
+    text-align: center !important;
 }
 .asimov-chip {
     display: inline-flex;
@@ -214,8 +224,8 @@ def cabecera(titulo: str, subtitulo: str) -> None:
     """Titulo principal con el degradado del proyecto."""
     st.markdown(
         f"""
-        <div style="text-align:center; width:100%;">
-            <h1 class="asimov-titulo" style="text-align:center;">{titulo}<br><span style="color:#6b7280;font-weight:300">de </span><span class="gradiente">Asimov</span></h1>
+        <div style="text-align:center !important; width:100%; margin:0 auto;">
+            <h1 class="asimov-titulo">{titulo}<br><span style="color:#6b7280;font-weight:300">de </span><span class="gradiente">Asimov</span></h1>
             <p class="asimov-subtitulo">{subtitulo}</p>
         </div>
         """,
